@@ -7,5 +7,7 @@ __pycache__/
 .venv/
 *.session
 *.session-journal
+*.session-shm
+*.session-wal
+data/
 dist/
-

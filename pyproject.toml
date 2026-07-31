@@ -4,7 +4,14 @@ version = "0.1.0"
 description = "Composable Telegram userbot features"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "aiosqlite>=0.21,<1",
+    "pydantic-settings>=2.10,<3",
+    "telethon @ https://codeberg.org/Lonami/Telethon/archive/570b7e5b03459cb5bd1c81bc1282f3cc4b8ed009.tar.gz#subdirectory=client&sha256=efc54cd85c482b3d6159b8880cd4ca77685b9e5551185dd103d1cac5b060aa7e",
+]
+
+[project.scripts]
+yukibot = "yukibot.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -21,10 +28,14 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/yukibot"]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.pytest.ini_options]
 addopts = "-q"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py312"
@@ -37,4 +48,3 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.12"
 strict = true
 files = ["src"]
-

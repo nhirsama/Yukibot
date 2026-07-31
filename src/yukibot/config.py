@@ -1,0 +1,61 @@
+"""Validated, immutable application configuration."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Annotated, Any
+
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="YUKIBOT_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        frozen=True,
+    )
+
+    telegram_api_id: int = Field(gt=0)
+    telegram_api_hash: SecretStr = Field(min_length=1)
+    telegram_session_path: Path = Path("data/yukibot.session")
+    database_url: str = "sqlite:///data/yukibot.db"
+    log_level: str = "INFO"
+    admin_ids: Annotated[tuple[int, ...], NoDecode] = ()
+    forwarder_workers: int = Field(default=1, ge=1, le=64)
+    forwarder_album_delay: float = Field(default=0.8, ge=0, le=10)
+    shutdown_timeout: float = Field(default=15.0, gt=0, le=300)
+
+    @field_validator("telegram_api_hash")
+    @classmethod
+    def validate_api_hash(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("telegram_api_hash must not be blank")
+        return value
+
+    @field_validator("database_url")
+    @classmethod
+    def validate_database_url(cls, value: str) -> str:
+        if not value.startswith("sqlite:///"):
+            raise ValueError("only sqlite:/// database URLs are currently supported")
+        return value
+
+    @field_validator("log_level")
+    @classmethod
+    def normalize_log_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in logging.getLevelNamesMapping():
+            raise ValueError(f"unknown log level: {value}")
+        return normalized
+
+    @field_validator("admin_ids", mode="before")
+    @classmethod
+    def parse_admin_ids(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            if not value.strip():
+                return ()
+            return tuple(int(item.strip()) for item in value.split(",") if item.strip())
+        return value

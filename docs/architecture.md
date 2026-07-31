@@ -1,6 +1,6 @@
 # Yukibot 架构设计
 
-> 状态：草案  
+> 状态：基础框架已实现；可靠任务阶段待实现
 > 语言：Python 3.12+  
 > 包与环境管理：uv  
 > Telegram 客户端：Telethon  

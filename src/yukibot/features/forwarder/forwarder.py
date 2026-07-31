@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from .album import AlbumBuffer
+from .album import AlbumBuffer, TaskFactory
 from .models import IncomingMessage, MessagesDeleted
 from .service import ForwarderService, ForwardingReport, SyncReport
 
@@ -19,6 +19,7 @@ class Forwarder:
         album_flush_delay: float = 0.8,
         on_background_report: BackgroundReportHandler | None = None,
         on_background_error: Callable[[BaseException], None] | None = None,
+        task_factory: TaskFactory | None = None,
     ) -> None:
         self._service = service
         self._on_background_report = on_background_report
@@ -27,6 +28,7 @@ class Forwarder:
             flush_delay=album_flush_delay,
             sort_key=lambda message: message.ref.message_id,
             on_error=on_background_error,
+            task_factory=task_factory,
         )
 
     async def handle_message(self, message: IncomingMessage) -> ForwardingReport:

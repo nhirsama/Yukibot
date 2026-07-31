@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Hashable
+from collections.abc import Awaitable, Callable, Coroutine, Hashable
 from typing import Any
 
 type FlushCallback[ItemT] = Callable[[tuple[ItemT, ...]], Awaitable[None]]
 type ErrorCallback = Callable[[BaseException], None]
+type TaskFactory = Callable[[Coroutine[Any, Any, None]], asyncio.Task[None]]
 
 
 class AlbumBuffer[KeyT: Hashable, ItemT]:
@@ -21,6 +22,7 @@ class AlbumBuffer[KeyT: Hashable, ItemT]:
         flush_delay: float = 0.8,
         sort_key: Callable[[ItemT], Any] | None = None,
         on_error: ErrorCallback | None = None,
+        task_factory: TaskFactory | None = None,
     ) -> None:
         if flush_delay < 0:
             raise ValueError("flush_delay must not be negative")
@@ -28,6 +30,7 @@ class AlbumBuffer[KeyT: Hashable, ItemT]:
         self._flush_delay = flush_delay
         self._sort_key = sort_key
         self._on_error = on_error
+        self._task_factory = task_factory or asyncio.create_task
         self._groups: dict[KeyT, list[ItemT]] = {}
         self._timers: dict[KeyT, asyncio.Task[None]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
@@ -42,7 +45,7 @@ class AlbumBuffer[KeyT: Hashable, ItemT]:
             previous = self._timers.get(key)
             if previous is not None:
                 previous.cancel()
-            task = asyncio.create_task(self._flush_after(key), name=f"album-buffer:{key}")
+            task = self._task_factory(self._flush_after(key))
             self._timers[key] = task
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)

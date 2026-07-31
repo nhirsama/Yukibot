@@ -22,7 +22,7 @@
 ## 模块边界
 
 ```text
-Telethon adapter（以后实现）
+Telethon adapter
         |
         | IncomingMessage / TelegramGateway
         v
@@ -32,8 +32,8 @@ Forwarder / ForwarderService
         +-- MessageLinkRepository
 ```
 
-模块不会创建 Telethon client、读取环境变量、注册事件 handler、处理管理员命令或决定数据库。
-这些职责属于未来的组合根和 adapter。
+核心模块不会创建 Telethon client、读取环境变量、注册事件 handler、处理管理员命令或决定数据库。
+现有 `feature.py`、`repository.py` 和全局组合根在核心边界之外完成这些接入工作。
 
 `TelegramGateway` 是功能本地的 Protocol。适配器应完成以下转换：
 
@@ -93,7 +93,7 @@ await forwarder.close()
 ## 持久化要求
 
 `InMemoryRouteRepository` 和 `InMemoryMessageLinkRepository` 只用于测试、开发或短生命周期嵌入。
-生产适配器必须持久化消息映射，否则重启后回复、编辑和删除同步会失效。
+生产运行使用 `SqliteRouteRepository` 和 `SqliteMessageLinkRepository` 持久化路由与消息映射。
 
 `MessageLinkRepository.save_many()` 应实现幂等 upsert。`ForwardingReport.failures` 保留原始应用级
 异常，未来的 durable job worker 可以据此区分重试、永久失败和 `RetryAfter`。持久任务表、租约和
@@ -102,7 +102,7 @@ await forwarder.close()
 ## 明确排除
 
 - Pyrogram 兼容层；
-- Telethon 事件注册；
+- Pyrogram 事件注册；
 - JSON 路由文件；
 - `/add`、`/remove`、`/status` 等展示层命令；
-- 全局单例、后台主进程和登录流程。
+- 全局可变单例。
