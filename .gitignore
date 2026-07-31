@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.session
+*.session-journal
+dist/
+

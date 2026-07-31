@@ -1,0 +1,619 @@
+# Yukibot 架构设计
+
+> 状态：草案  
+> 语言：Python 3.12+  
+> 包与环境管理：uv  
+> Telegram 客户端：Telethon  
+> 架构形态：模块化单体、端口与适配器、功能纵向切片
+
+## 1. 背景
+
+Yukibot 是运行在 Telegram 用户账号上的自动化程序。首个功能是将指定频道或话题中的消息转发到目标群组，后续可能加入消息归档、关键词提醒、自动回复、内容加工和定时任务等功能。
+
+系统需要保持部署简单，同时让各功能能够独立开发、测试、启停和删除。这里不采用微服务，也不构建重量级插件框架；使用单进程 `asyncio` 应用，通过稳定契约隔离 Telethon、存储设施和业务功能。
+
+## 2. 设计目标
+
+1. **低耦合**：功能之间禁止直接调用实现，只能通过公开事件契约通信。
+2. **边界清晰**：每个功能拥有自己的模型、表、仓储、服务和测试。
+3. **基础设施可替换**：Telethon、SQLite 等实现不能泄漏到业务服务。
+4. **扩展成本低**：增加普通功能只需新增一个功能包，并在组合根注册。
+5. **运行可靠**：消息处理具备幂等、限流、重试、顺序控制和可观测性。
+6. **保持简单**：手工依赖注入、显式注册，不使用自动扫描和 DI 框架。
+
+## 3. 非目标
+
+- 不为未知需求提前引入微服务、Redis、Celery、Kafka 或分布式事务。
+- 不构造一套覆盖 Telegram 所有能力的通用领域模型。
+- 不允许功能通过共享数据库表隐式通信。
+- 不追求运行时安装第三方插件；插件均是同一代码库内受控的功能模块。
+- 不同时运行 Telethon 与 Pyrogram。`telegram-forwarder` 仅作为行为和边界场景参考。
+
+## 4. 核心原则
+
+### 4.1 依赖方向
+
+```text
+                       bootstrap（组合根）
+                    /          |           \
+                   v           v            v
+              features      kernel       adapters
+                  |             ^            |
+                  |             |            |
+                  +------ contracts <--------+
+```
+
+- `kernel` 只包含生命周期、事件分发等与 Telegram 无关的机制。
+- `contracts` 只包含不可变数据契约和少量协议，不包含业务实现。
+- `adapters` 实现外部系统接入，例如 Telethon、SQLite 和系统时钟。
+- `features` 只依赖契约和自己定义的端口，不依赖 Telethon、其他功能实现或组合根。
+- `bootstrap` 是唯一可以知道所有具体实现并把它们组装起来的位置。
+
+### 4.2 功能拥有自己的数据
+
+每个功能独占自己的数据库表，表名使用功能前缀，例如：
+
+```text
+forwarder_routes
+forwarder_message_links
+forwarder_jobs
+archive_messages
+reminder_rules
+```
+
+禁止跨功能外键、跨功能 SQL JOIN，以及直接读取另一个功能的表。确实需要共享信息时，由数据拥有者发布集成事件。
+
+### 4.3 Telethon 是适配器
+
+Telethon 的 `Client`、事件对象、消息对象和异常不得进入 `features`。Telethon 适配器负责：
+
+- 将 Telethon update 转换为稳定的应用事件；
+- 将功能发出的操作转换为 Telethon API 调用；
+- 将 `FloodWait`、网络异常等转换为应用级错误；
+- 隔离 Telethon 主版本升级造成的 API 变化。
+
+对于媒体等不适合完整标准化的对象，契约只保存稳定引用，例如 `chat_id`、`message_id` 和 `grouped_id`。真正的读取、复制或转发由 Telegram 端口根据引用完成。
+
+### 4.4 显式优于自动
+
+功能在 `bootstrap.py` 中显式创建和注册：
+
+```python
+features = [
+    build_forwarder(container),
+    # build_archive(container),
+]
+```
+
+这比目录扫描和 Python entry point 更容易理解、调试和静态检查。只有出现独立发布第三方插件的真实需求时，才引入动态发现机制。
+
+## 5. 推荐目录结构
+
+```text
+yukibot/
+├── pyproject.toml
+├── uv.lock
+├── .env.example
+├── README.md
+├── docs/
+│   └── architecture.md
+├── migrations/
+├── src/yukibot/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── bootstrap.py
+│   ├── config.py
+│   │
+│   ├── kernel/
+│   │   ├── lifecycle.py
+│   │   ├── event_bus.py
+│   │   ├── feature.py
+│   │   └── errors.py
+│   │
+│   ├── contracts/
+│   │   ├── telegram.py
+│   │   ├── database.py
+│   │   └── events.py
+│   │
+│   ├── adapters/
+│   │   ├── telegram/
+│   │   │   ├── client.py
+│   │   │   ├── event_source.py
+│   │   │   └── gateway.py
+│   │   ├── database/
+│   │   │   ├── connection.py
+│   │   │   └── migrations.py
+│   │   └── observability/
+│   │       └── logging.py
+│   │
+│   └── features/
+│       └── forwarder/
+│           ├── feature.py
+│           ├── contracts.py
+│           ├── models.py
+│           ├── ports.py
+│           ├── service.py
+│           ├── handlers.py
+│           ├── repository.py     # 基于 Database 契约的本功能实现
+│           ├── worker.py
+│           └── migrations/
+└── tests/
+    ├── unit/
+    ├── integration/
+    └── contract/
+```
+
+功能包默认保持扁平。只有单个功能明显变大后，才在其内部拆分 `domain/`、`application/` 和 `infrastructure/`，避免为了形式制造目录层级。
+
+## 6. 内核设计
+
+### 6.1 Feature 契约
+
+功能只通过生命周期契约接入进程：
+
+```python
+from typing import Protocol
+
+
+class Feature(Protocol):
+    name: str
+
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+```
+
+事件订阅、仓储和外部端口通过构造函数注入。不要把包含所有服务的 `AppContext` 传给功能，否则它会演变成 Service Locator，让依赖重新变得隐式。
+
+### 6.2 事件总线
+
+进程内事件总线负责功能解耦，不承担持久化消息队列的职责：
+
+```python
+from collections.abc import Awaitable, Callable
+from typing import Protocol, TypeVar
+
+EventT = TypeVar("EventT")
+EventHandler = Callable[[EventT], Awaitable[None]]
+
+
+class EventBus(Protocol):
+    def subscribe(
+        self,
+        event_type: type[EventT],
+        handler: EventHandler[EventT],
+    ) -> None: ...
+
+    async def publish(self, event: object) -> None: ...
+```
+
+实现必须满足：
+
+- 单个 handler 失败不能阻止其他订阅者执行；
+- 所有后台任务由统一的 Task Supervisor 持有，不能裸用无人管理的 `asyncio.create_task()`；
+- handler 名称、耗时、异常和事件类型进入结构化日志；
+- 默认不保证进程崩溃后的事件恢复；需要可靠交付的功能必须先写入自己的任务表。
+
+第一版可使用 `asyncio.gather(..., return_exceptions=True)` 并发分发。出现慢订阅者后，再为该功能增加独立 inbox/worker，而不是提前建设通用消息中间件。
+
+### 6.3 应用事件
+
+外部输入转换为不可变事件。契约不包含 Telethon 类型：
+
+```python
+from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass(frozen=True, slots=True)
+class MessageRef:
+    chat_id: int
+    message_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramMessageReceived:
+    message: MessageRef
+    sender_id: int | None
+    topic_id: int | None
+    grouped_id: int | None
+    text: str | None
+    occurred_at: datetime
+    outgoing: bool
+```
+
+契约按增加字段的方式演进；已有字段不得随意改变语义。需要破坏性变化时新增 `V2` 契约并保留过渡期。
+
+## 7. 端口与适配器
+
+### 7.1 功能本地端口
+
+端口应由使用者定义，而不是由基础设施预先设计一个巨大的 `TelegramService`。例如 forwarder 只声明自己需要的能力：
+
+```python
+from typing import Protocol
+
+
+class ForwarderTelegram(Protocol):
+    async def forward_message(
+        self,
+        source: MessageRef,
+        destination_chat_id: int,
+        *,
+        destination_topic_id: int | None,
+        reply_to: int | None,
+    ) -> MessageRef: ...
+
+    async def copy_message(
+        self,
+        source: MessageRef,
+        destination_chat_id: int,
+        *,
+        destination_topic_id: int | None,
+        reply_to: int | None,
+    ) -> MessageRef: ...
+
+    async def edit_copied_message(self, target: MessageRef, text: str) -> None: ...
+
+    async def delete_messages(self, messages: list[MessageRef]) -> None: ...
+```
+
+Telethon gateway 通过 Python 的结构化类型同时满足多个功能的小型 Protocol。新增功能通常只需新增本地端口，不必修改全局接口。
+
+### 7.2 仓储端口
+
+仓储 Protocol 放在功能内部，业务服务不依赖 SQLAlchemy、`aiosqlite` 或 SQL：
+
+```python
+class RouteRepository(Protocol):
+    async def matching(self, chat_id: int, topic_id: int | None) -> list[Route]: ...
+    async def add(self, route: Route) -> Route: ...
+    async def remove(self, route_id: int) -> None: ...
+```
+
+简单查询使用专用方法，避免泄漏通用 ORM Query 对象。事务边界由单个功能服务控制；不设计跨功能事务。
+
+`repository.py` 是功能最外层的持久化适配器，它可以使用 `contracts.database.Database` 提供的连接和事务能力，但不能把连接、游标或 SQL 类型返回给业务服务。具体 `aiosqlite.Connection` 只存在于 `adapters/database`；因此未来替换驱动时，功能业务代码不变。
+
+## 8. Forwarder 功能设计
+
+### 8.1 职责
+
+Forwarder 负责：
+
+- 管理来源到目标的路由；
+- 根据话题、关键词和媒体类型过滤消息；
+- 原生转发或复制消息；
+- 保持相册、回复关系、编辑和删除同步；
+- 记录源消息与目标消息的映射；
+- 保证自身任务幂等并防止转发循环。
+
+它不负责创建 Telethon client、全局登录、数据库连接、日志初始化或其他功能的行为。
+
+### 8.2 核心模型
+
+```text
+Route
+- id
+- source_chat_id
+- source_topic_id
+- destination_chat_id
+- destination_topic_id
+- mode: forward | copy
+- filters
+- enabled
+
+MessageLink
+- route_id
+- source_chat_id
+- source_message_id
+- destination_chat_id
+- destination_message_id
+- grouped_id
+
+ForwardJob
+- id
+- route_id
+- source_chat_id
+- source_message_id
+- kind: create | edit | delete
+- deduplication_key
+- state: pending | processing | succeeded | failed
+- attempts
+- available_at
+- last_error
+```
+
+建议约束：
+
+```text
+UNIQUE(deduplication_key)
+```
+
+`deduplication_key` 由 route、源消息、操作类型和事件版本组成。create/delete 各自只有一个稳定键；edit 必须包含 Telegram 提供的编辑时间或内容版本，因此同一次编辑重放会被去重，但后续编辑仍能正常执行。该约束是事件重放和重试时避免重复发送的最后一道防线。
+
+### 8.3 处理流程
+
+```text
+Telethon update
+    -> TelegramMessageReceived
+    -> Forwarder handler
+    -> 查询匹配路由并写入 ForwardJob
+    -> worker 领取任务
+    -> 过滤与回复映射
+    -> Telegram gateway
+    -> 写入 MessageLink
+    -> 标记任务完成
+```
+
+handler 只做快速校验和任务落库，不在 Telethon update 回调里下载、上传或等待限流。worker 负责实际发送。
+
+### 8.4 顺序与并发
+
+- 同一个目标 chat/topic 使用同一逻辑队列，按源消息顺序处理。
+- 不同目标可以并发发送。
+- worker 数量和队列上限来自配置。
+- 领取任务时使用带租约的 `processing` 状态；进程异常退出后，超时任务可重新变为 `pending`。
+- 相册按 `grouped_id` 在短时间窗口内聚合，再作为一个任务提交。
+- 编辑或删除早于 create 完成时，延后该任务，而不是直接丢弃。
+
+SQLite 单实例部署可以使用事务更新完成任务领取。未来切换 PostgreSQL 时，可改为 `FOR UPDATE SKIP LOCKED`，业务服务无需变化。
+
+### 8.5 限流和重试
+
+限流属于 Telegram gateway，因为所有功能共享同一个 Telegram 账号和 API 配额。
+
+- 每个目标会话独立限速，同时设置账号级并发上限。
+- `FloodWait` 使用服务端要求的等待时间，不做忙循环。
+- 网络超时和临时 RPC 错误使用有上限的指数退避并加入 jitter。
+- 权限错误、无效目标、受保护内容等永久错误不自动无限重试。
+- 日志中记录 route、source、destination、attempt 和错误分类，但不记录 session 或敏感正文。
+
+### 8.6 循环防护
+
+同时采用以下规则：
+
+1. 忽略 userbot 自己发出的 outgoing update，除非某功能显式订阅它。
+2. 发送成功后持久化目标 `MessageRef`，再次收到时能够识别为系统生成消息。
+3. 创建或更新路由时检查直接自环。
+4. 将路由视为有向图并拒绝形成环的配置；是否允许无环的多跳转发必须由显式配置决定。
+
+## 9. 配置与密钥
+
+使用 `pydantic-settings` 从环境变量读取配置，并在启动前完成校验：
+
+```text
+YUKIBOT_TELEGRAM_API_ID
+YUKIBOT_TELEGRAM_API_HASH
+YUKIBOT_TELEGRAM_SESSION_PATH
+YUKIBOT_DATABASE_URL
+YUKIBOT_LOG_LEVEL
+YUKIBOT_ADMIN_IDS
+YUKIBOT_FORWARDER_WORKERS
+```
+
+规则：
+
+- `.env` 仅用于本地开发，不能提交；仓库只提交 `.env.example`。
+- `.session` 文件、API hash 和登录验证码不得进入日志或版本控制。
+- 动态路由存数据库，环境变量只保存部署级静态配置。
+- 配置对象在进程启动后视为只读。
+
+## 10. 持久化与迁移
+
+首个版本推荐 SQLite WAL 模式。它足以支持单进程 userbot，运维成本最低。
+
+可选择 SQLAlchemy 2 async + Alembic，也可以使用 `aiosqlite` 和按版本执行的 SQL 文件。为了减少依赖，第一版建议 `aiosqlite` 加功能自有迁移文件；如果很快需要 PostgreSQL，再切换 SQLAlchemy/Alembic。
+
+迁移规则：
+
+- 每个功能维护自己的迁移目录和表前缀；
+- 应用启动时先迁移，成功后再连接 Telegram；
+- 迁移只能向前执行，生产数据库变更前先备份；
+- 功能卸载默认不删除其数据，数据清理由显式运维命令完成。
+
+## 11. 启动与关闭生命周期
+
+```text
+1. 加载并校验 Settings
+2. 初始化结构化日志
+3. 打开数据库并执行迁移
+4. 创建 EventBus 和 Task Supervisor
+5. 创建 Telethon gateway
+6. 构造并注册 features
+7. 启动 feature workers
+8. 登录并启动 Telethon event source
+9. 等待 SIGINT / SIGTERM
+10. 停止接收新 update
+11. 等待进行中的任务到达关闭超时
+12. 停止 features、关闭 Telethon 和数据库
+```
+
+建议使用 `asyncio.TaskGroup` 管理长期任务，并通过统一 shutdown event 协调关闭。启动中任一步失败，都应逆序释放已经创建的资源。
+
+## 12. 管理命令
+
+管理命令属于对应功能，例如 `/forward add` 放在 forwarder 中，不建立一个包含全部业务的中央 command 模块。
+
+Telegram adapter 可以提供一个小型 `CommandRouter`，统一完成：
+
+- 命令解析；
+- 管理员白名单；
+- 命令名称冲突检查；
+- 错误到用户消息的转换。
+
+功能只注册命令及 handler。命令 handler 调用本功能 service，不能绕过 service 直接写数据库。
+
+## 13. 可观测性
+
+第一版使用标准库 `logging` 输出 JSON 或键值结构化日志，不必为了日志引入大型框架。
+
+所有事件和任务至少包含：
+
+```text
+event_type
+feature
+operation
+chat_id
+message_id
+route_id
+job_id
+duration_ms
+attempt
+result
+error_type
+```
+
+健康状态至少包括：Telegram 是否连接、数据库是否可用、pending/failed job 数量和最近一次成功转发时间。单进程部署可以先通过 `/status` 和日志暴露，不需要立即启动 Web 服务。
+
+## 14. 测试策略
+
+### 14.1 单元测试
+
+业务服务使用内存仓储和 fake Telegram port，不启动 Telethon：
+
+- 路由匹配和过滤；
+- 幂等处理；
+- 回复映射；
+- 循环检测；
+- 重试分类；
+- 编辑和删除的状态转换。
+
+### 14.2 集成测试
+
+使用临时 SQLite 数据库验证：
+
+- migrations；
+- repository；
+- job 领取、租约和恢复；
+- 唯一约束和事务行为。
+
+### 14.3 契约测试
+
+针对 Telethon gateway 建立契约测试，确保它持续满足各功能本地 Protocol。真实 Telegram 账号测试单独标记为 `live`，默认测试套件不执行。
+
+测试目录按测试类型组织，但文件名映射到功能，例如：
+
+```text
+tests/unit/features/forwarder/test_service.py
+tests/integration/features/forwarder/test_repository.py
+tests/contract/adapters/telegram/test_gateway.py
+```
+
+## 15. uv 与工程工具
+
+建议依赖：
+
+```text
+运行依赖
+- telethon
+- pydantic-settings
+- aiosqlite
+
+开发依赖
+- pytest
+- pytest-asyncio
+- ruff
+- mypy
+```
+
+常用命令：
+
+```bash
+uv init --package
+uv add telethon pydantic-settings aiosqlite
+uv add --dev pytest pytest-asyncio ruff mypy
+uv lock
+uv sync --frozen
+uv run yukibot
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+```
+
+若直接使用 Codeberg 的 Telethon v2 分支，应固定到经过验证的 tag 或 commit，而不是长期跟随分支头：
+
+```bash
+uv add "telethon @ git+https://codeberg.org/Lonami/Telethon.git@<verified-tag-or-commit>"
+```
+
+`pyproject.toml` 声明兼容范围，`uv.lock` 提交到仓库，以获得可重复部署。代码和文档必须针对同一个 Telethon 主版本，不能混用 v1 的 `TelegramClient` 示例与 v2 的 `Client` API。
+
+## 16. 新增功能流程
+
+以新增 `keyword_alert` 为例：
+
+1. 创建 `features/keyword_alert/`。
+2. 在包内定义规则模型、仓储 Protocol 和它需要的 Telegram Protocol。
+3. 订阅 `TelegramMessageReceived`，不修改 forwarder。
+4. 创建带 `keyword_alert_` 前缀的表和迁移。
+5. 在 `bootstrap.py` 注入 gateway、repository 和 event bus。
+6. 增加单元测试与仓储集成测试。
+7. 只有需要让其他功能消费结果时，才新增公开集成事件。
+
+完成上述步骤时，已有功能的代码不应发生变化；通常只允许修改组合根和配置定义。
+
+## 17. 强制边界规则
+
+以下规则应在代码评审中执行：
+
+1. `features/x` 不得 import `features/y` 的实现。
+2. 功能的模型、服务、handler 和 worker 不得 import `telethon`、`aiosqlite` 或具体 adapter；最外层 repository 只能依赖数据库契约。
+3. 功能不得读取或修改其他功能的表。
+4. Telethon 对象不得出现在应用事件和业务模型中。
+5. 所有后台任务必须有所有者、关闭策略和异常处理。
+6. 所有外部副作用必须通过端口执行并可在测试中替换。
+7. 不创建全局可变 client、database session 或 repository。
+8. 不添加“万能 utils”；代码应放到拥有该概念的模块中。
+9. 只有至少两个功能出现相同且语义稳定的需求后，才抽取共享代码。
+10. 新增框架或中间件必须解决已经出现的问题，而不是假设中的扩展需求。
+
+可以增加一个简单的 import 边界测试，扫描 AST 或使用 `import-linter`，自动阻止功能间违规依赖。第一版优先用测试实现，避免增加运行时复杂度。
+
+## 18. 演进路线
+
+### 阶段一：可用骨架
+
+- uv 工程、配置、日志和 SQLite；
+- Telethon adapter；
+- EventBus 和显式功能注册；
+- 单路由文字消息转发。
+
+### 阶段二：可靠转发
+
+- 路由管理；
+- ForwardJob 和 MessageLink；
+- 媒体、相册、回复、编辑和删除；
+- 限流、重试、幂等和恢复。
+
+### 阶段三：验证扩展性
+
+- 添加第二个真实功能；
+- 根据实际重复点提取共享契约；
+- 加强边界测试和运行状态统计。
+
+### 阶段四：按压力演进
+
+- SQLite 写入或并发成为瓶颈时切换 PostgreSQL；
+- 单进程吞吐不足时再引入外部队列；
+- 只有多个功能需要远程管理时再增加 HTTP 管理接口。
+
+这些变化都应发生在 adapter 或组合根，业务功能的核心逻辑保持不变。
+
+## 19. 架构决策摘要
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| 部署形态 | 模块化单体 | userbot 规模下简单可靠 |
+| 并发模型 | asyncio | 与 Telethon 原生模型一致 |
+| 功能接入 | 显式注册 | 清晰、可调试、无扫描魔法 |
+| 功能通信 | 不可变应用事件 | 避免直接依赖实现 |
+| 外部能力 | 功能本地 Protocol | 接口小且按需演进 |
+| 初始存储 | SQLite WAL | 单实例下运维成本最低 |
+| 可靠任务 | 功能自有 job 表 | 明确数据和恢复责任 |
+| 依赖注入 | 手工组合根 | 不引入 DI 框架和 Service Locator |
+| Telegram SDK | 仅 Telethon | 避免双客户端和双会话模型 |
+| 包管理 | uv + 提交 uv.lock | 快速且可重复构建 |
+
+这套架构的最小稳定核心只有生命周期、事件分发和外部事件契约。功能以纵向切片形式独立拥有业务和数据；基础设施通过小型结构化 Protocol 接入。它不会消除所有依赖，但会让依赖保持单向、显式、可替换和可测试。
