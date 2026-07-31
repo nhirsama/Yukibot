@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 
@@ -39,13 +42,21 @@ class TelethonEventSource:
         peers: PeerRegistry,
         *,
         now: Callable[[], datetime] | None = None,
+        drain_timeout: float = 15.0,
+        logger: logging.Logger | None = None,
     ) -> None:
+        if drain_timeout <= 0:
+            raise ValueError("drain_timeout must be positive")
         self._client = client
         self._bus = bus
         self._peers = peers
         self._now = now or (lambda: datetime.now(UTC))
+        self._drain_timeout = drain_timeout
+        self._logger = logger or logging.getLogger(__name__)
         self._event_types: tuple[type[object], type[object], type[object]] | None = None
         self._started = False
+        self._accepting = False
+        self._inflight: set[asyncio.Task[object]] = set()
 
     async def start(self) -> None:
         if self._started:
@@ -56,50 +67,81 @@ class TelethonEventSource:
             self._handle_edit,
             self._handle_delete,
         )
-        for handler, event_type in zip(handlers, event_types, strict=True):
-            self._client.add_event_handler(handler, event_type)
+        self._accepting = True
         self._event_types = event_types
         try:
-            await self._client.connect()
-            if not await self._client.is_authorized():
-                await self._client.interactive_login()
-            await self.refresh_peers()
+            for handler, event_type in zip(handlers, event_types, strict=True):
+                self._client.add_event_handler(handler, event_type)
         except BaseException:
+            self._accepting = False
             self._remove_handlers()
-            await self._client.disconnect()
             raise
         self._started = True
 
     async def stop(self) -> None:
         if not self._started and self._event_types is None:
             return
+        self._accepting = False
         self._remove_handlers()
         self._started = False
-
-    async def refresh_peers(self) -> None:
-        dialogs = await self._client.get_dialogs()
-        for dialog in dialogs:
-            self._peers.remember(dialog.chat)
+        inflight = tuple(self._inflight)
+        if not inflight:
+            return
+        _, pending = await asyncio.wait(inflight, timeout=self._drain_timeout)
+        if not pending:
+            return
+        self._logger.error(
+            "telegram event handlers did not drain before timeout",
+            extra={"task_count": len(pending), "timeout": self._drain_timeout},
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
     async def _handle_new(self, raw_event: object) -> object:
+        if not self._accepting:
+            return None
         event = cast(NativeMessage, raw_event)
         self._remember_message_peers(event)
-        await self._bus.publish(TelegramMessageReceived(normalize_message(event, self._now())))
+        await self._publish(TelegramMessageReceived(normalize_message(event, self._now())))
         return None
 
     async def _handle_edit(self, raw_event: object) -> object:
+        if not self._accepting:
+            return None
         event = cast(NativeMessage, raw_event)
         self._remember_message_peers(event)
-        await self._bus.publish(TelegramMessageEdited(normalize_message(event, self._now())))
+        observed_at = self._now()
+        message = normalize_message(event, observed_at)
+        if message.edited_at is None:
+            message = replace(message, edited_at=observed_at)
+        await self._publish(TelegramMessageEdited(message))
         return None
 
     async def _handle_delete(self, raw_event: object) -> object:
+        if not self._accepting:
+            return None
         event = cast(NativeDeletedEvent, raw_event)
         chat_id = _channel_dialog_id(event.channel_id) if event.channel_id is not None else None
-        await self._bus.publish(
+        await self._publish(
             TelegramMessagesDeleted(tuple(event.message_ids), self._now(), chat_id=chat_id)
         )
         return None
+
+    async def _publish(
+        self,
+        event: TelegramMessageReceived | TelegramMessageEdited | TelegramMessagesDeleted,
+    ) -> None:
+        task = asyncio.current_task()
+        if task is None:
+            await self._bus.publish(event)
+            return
+        tracked = cast(asyncio.Task[object], task)
+        self._inflight.add(tracked)
+        try:
+            await self._bus.publish(event)
+        finally:
+            self._inflight.discard(tracked)
 
     def _remember_message_peers(self, event: NativeMessage) -> None:
         self._peers.remember(event.chat)
@@ -123,6 +165,7 @@ def normalize_message(message: NativeMessage, fallback_date: datetime) -> Telegr
     occurred_at = message.date if isinstance(message.date, datetime) else fallback_date
     if occurred_at.tzinfo is None:
         occurred_at = occurred_at.replace(tzinfo=UTC)
+    edited_at = _normalized_date(getattr(raw, "edit_date", None))
     return TelegramMessage(
         ref=MessageRef(peer_dialog_id(message.chat), message.id),
         content_type=content_type,
@@ -135,6 +178,7 @@ def normalize_message(message: NativeMessage, fallback_date: datetime) -> Telegr
         reply_to_message_id=message.replied_message_id,
         service=service,
         outgoing=message.outgoing,
+        edited_at=edited_at,
     )
 
 
@@ -180,6 +224,14 @@ def _content_type(message: NativeMessage) -> TelegramContentType:
                 )
         return TelegramContentType.DOCUMENT
     return TelegramContentType.OTHER
+
+
+def _normalized_date(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(value, UTC)
+    return None
 
 
 def _topic_id(raw: object, message_id: int) -> int | None:

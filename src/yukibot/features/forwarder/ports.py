@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
+from .jobs import ForwardJob, PendingForwardJob
 from .models import (
     DestinationEndpoint,
     ForwardMode,
@@ -37,6 +38,26 @@ class MessageLinkRepository(Protocol):
     async def find_by_source_message_id(self, message_id: int) -> Sequence[MessageLink]: ...
 
     async def remove(self, link: MessageLink) -> None: ...
+
+
+class ForwardJobRepository(Protocol):
+    async def enqueue(self, jobs: Sequence[PendingForwardJob]) -> int: ...
+
+    async def recover_incomplete(self) -> int: ...
+
+    async def claim_due(self, now: float) -> Sequence[ForwardJob]: ...
+
+    async def mark_succeeded(self, job_ids: Sequence[int]) -> None: ...
+
+    async def mark_failed(self, job_ids: Sequence[int], error: str) -> None: ...
+
+    async def reschedule(
+        self,
+        job_ids: Sequence[int],
+        *,
+        available_at: float,
+        error: str,
+    ) -> None: ...
 
 
 class TelegramGateway(Protocol):

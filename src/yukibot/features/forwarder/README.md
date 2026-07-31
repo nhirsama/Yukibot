@@ -1,6 +1,6 @@
 # Forwarder feature
 
-这是一个不依赖 Telegram SDK、数据库驱动和应用主框架的可复用转发模块。它参考了
+核心公开入口是一个不依赖 Telegram SDK、数据库驱动和应用主框架的可复用转发模块。它参考了
 [`alpersamur3/telegram-forwarder`](https://github.com/alpersamur3/telegram-forwarder)
 （MIT License）的功能行为，但重新定义了模块边界，没有复制其 Pyrogram handler 结构。
 
@@ -12,12 +12,12 @@
 - native forward 和 copy 模式；
 - native forward 受限时按路由回退到 copy；
 - 回复链 source/destination message ID 映射；
-- 相册按 `(chat_id, media_group_id)` 缓冲、排序并整体发送；
+- 相册按 `(chat_id, grouped_id)` 缓冲、排序并整体发送；
 - 编辑与删除同步；
 - 缺少来源 chat 的删除事件默认不做危险的模糊匹配；
 - 服务消息规范化为纯文本；
 - chat 级路由图循环检测；
-- 可供 Telegram gateway 使用的滑动窗口限流器。
+- 重放与并发重复事件在 Telegram 副作用前检查持久映射。
 
 ## 模块边界
 
@@ -33,15 +33,20 @@ Forwarder / ForwarderService
 ```
 
 核心模块不会创建 Telethon client、读取环境变量、注册事件 handler、处理管理员命令或决定数据库。
-现有 `feature.py`、`repository.py` 和全局组合根在核心边界之外完成这些接入工作。
+现有 `feature.py`、`job_repository.py`、`repository.py` 和 `infrastructure/` 在核心边界之外完成接入。
+`yukibot.features.forwarder` 只导出核心 API，不会隐式加载 Kernel、SQLite 或 Telethon 接入层。
 
-`TelegramGateway` 是功能本地的 Protocol。适配器应完成以下转换：
+`TelegramGateway` 是功能本地的 Protocol。具体实现位于
+`features/forwarder/infrastructure/telethon_gateway.py`，应完成以下转换：
 
-- Telethon new/edit/delete update -> `IncomingMessage` / `MessagesDeleted`；
+- Forwarder 操作 -> Telethon API 调用；
 - Telethon FloodWait -> `RetryAfter`；
 - 原生转发受限 -> `NativeForwardUnsupported`；
 - 消息不存在 -> `MessageNotFound`；
 - 内容未变化 -> `MessageNotModified`。
+
+Telethon update 到应用事件的规范化由共享的 `adapters/telegram/event_source.py` 负责，功能专用
+gateway 不注册 handler，也不拥有 client 生命周期。
 
 格式化实体和媒体不被复制到领域模型。gateway 收到稳定的 `MessageRef` 后，应使用 Telethon 读取、
 复制或转发原始消息，从而完整保留 Telegram 能力且不污染业务边界。
@@ -90,14 +95,16 @@ await forwarder.handle_message(
 await forwarder.close()
 ```
 
-## 持久化要求
+## 框架运行路径
 
-`InMemoryRouteRepository` 和 `InMemoryMessageLinkRepository` 只用于测试、开发或短生命周期嵌入。
-生产运行使用 `SqliteRouteRepository` 和 `SqliteMessageLinkRepository` 持久化路由与消息映射。
+直接使用 `Forwarder` facade 时，相册由内存滑动窗口组装，适合嵌入和单元测试。Yukibot 框架本身
+不走这条路径：`ForwarderFeature` 将 receive/edit/delete 事件写入 `forwarder_jobs`，相册消息共享
+`group_key` 和可执行时间，由单 worker 批量领取。worker 根据 `RetryAfter` 或指数退避重新调度，
+永久错误和达到最大尝试次数的任务进入 `failed`，启动时恢复中断的 `processing` 任务。
 
-`MessageLinkRepository.save_many()` 应实现幂等 upsert。`ForwardingReport.failures` 保留原始应用级
-异常，未来的 durable job worker 可以据此区分重试、永久失败和 `RetryAfter`。持久任务表、租约和
-崩溃恢复尚未在本阶段实现，它们属于 forwarder 的下一层运行适配器，而不是核心转发策略。
+`MessageLinkRepository.save_many()` 使用幂等 upsert，服务在发送前检查已有映射，并用 route 级锁
+阻止同进程并发重复发送。这提供 at-least-once 任务执行和常规重放幂等；Telegram 发送成功但映射
+落库前进程崩溃仍可能产生重复，因为两个系统之间不存在原子事务。
 
 ## 明确排除
 

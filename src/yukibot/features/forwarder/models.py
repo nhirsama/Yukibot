@@ -3,44 +3,47 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import StrEnum
+
+from yukibot.contracts import (
+    MessageRef as MessageRef,
+)
+from yukibot.contracts import (
+    TelegramContentType as ContentType,
+)
+from yukibot.contracts import (
+    TelegramMessage as IncomingMessage,
+)
+from yukibot.contracts import (
+    TelegramMessagesDeleted as MessagesDeleted,
+)
+from yukibot.contracts import (
+    TelegramServiceKind as ServiceKind,
+)
+from yukibot.contracts import (
+    TelegramServiceMessage as ServiceMessage,
+)
+
+__all__ = [
+    "ContentType",
+    "DestinationEndpoint",
+    "ForwardMode",
+    "IncomingMessage",
+    "MessageFilter",
+    "MessageLink",
+    "MessageRef",
+    "MessagesDeleted",
+    "Route",
+    "ServiceKind",
+    "ServiceMessage",
+    "SourceEndpoint",
+    "normalize_general_topic",
+]
 
 
 class ForwardMode(StrEnum):
     COPY = "copy"
     FORWARD = "forward"
-
-
-class ContentType(StrEnum):
-    TEXT = "text"
-    PHOTO = "photo"
-    VIDEO = "video"
-    DOCUMENT = "document"
-    AUDIO = "audio"
-    VOICE = "voice"
-    VIDEO_NOTE = "video_note"
-    STICKER = "sticker"
-    ANIMATION = "animation"
-    POLL = "poll"
-    LOCATION = "location"
-    CONTACT = "contact"
-    VENUE = "venue"
-    DICE = "dice"
-    GAME = "game"
-    SERVICE = "service"
-    OTHER = "other"
-
-
-class ServiceKind(StrEnum):
-    MEMBERS_JOINED = "members_joined"
-    MEMBER_LEFT = "member_left"
-    MESSAGE_PINNED = "message_pinned"
-    TITLE_CHANGED = "title_changed"
-    TOPIC_CREATED = "topic_created"
-    TOPIC_CLOSED = "topic_closed"
-    TOPIC_REOPENED = "topic_reopened"
-    OTHER = "other"
 
 
 def normalize_general_topic(topic_id: int | None) -> int:
@@ -57,17 +60,6 @@ def _validate_chat_id(chat_id: int) -> None:
 def _validate_topic_id(topic_id: int | None) -> None:
     if topic_id is not None and topic_id < 0:
         raise ValueError("topic_id must not be negative")
-
-
-@dataclass(frozen=True, slots=True)
-class MessageRef:
-    chat_id: int
-    message_id: int
-
-    def __post_init__(self) -> None:
-        _validate_chat_id(self.chat_id)
-        if self.message_id <= 0:
-            raise ValueError("message_id must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,42 +91,6 @@ class DestinationEndpoint:
     def __post_init__(self) -> None:
         _validate_chat_id(self.chat_id)
         _validate_topic_id(self.topic_id)
-
-
-@dataclass(frozen=True, slots=True)
-class ServiceMessage:
-    kind: ServiceKind
-    actor_name: str | None = None
-    member_names: tuple[str, ...] = ()
-    new_title: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class IncomingMessage:
-    ref: MessageRef
-    content_type: ContentType
-    occurred_at: datetime
-    topic_id: int | None = None
-    sender_id: int | None = None
-    text: str | None = None
-    caption: str | None = None
-    reply_to_message_id: int | None = None
-    media_group_id: int | str | None = None
-    service: ServiceMessage | None = None
-    outgoing: bool = False
-
-    def __post_init__(self) -> None:
-        _validate_topic_id(self.topic_id)
-        if self.reply_to_message_id is not None and self.reply_to_message_id <= 0:
-            raise ValueError("reply_to_message_id must be positive")
-        if self.content_type is ContentType.SERVICE and self.service is None:
-            raise ValueError("service details are required for service messages")
-        if self.service is not None and self.content_type is not ContentType.SERVICE:
-            raise ValueError("service details are only valid for service messages")
-
-    @property
-    def searchable_text(self) -> str:
-        return self.text or self.caption or ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,17 +166,3 @@ class MessageLink:
     def __post_init__(self) -> None:
         if self.route_id <= 0:
             raise ValueError("route_id must be positive")
-
-
-@dataclass(frozen=True, slots=True)
-class MessagesDeleted:
-    message_ids: tuple[int, ...]
-    chat_id: int | None = None
-
-    def __post_init__(self) -> None:
-        if not self.message_ids:
-            raise ValueError("message_ids must not be empty")
-        if any(message_id <= 0 for message_id in self.message_ids):
-            raise ValueError("message_ids must be positive")
-        if self.chat_id == 0:
-            raise ValueError("chat_id must not be zero")

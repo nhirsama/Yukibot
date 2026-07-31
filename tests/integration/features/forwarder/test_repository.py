@@ -4,7 +4,6 @@ import pytest
 
 from yukibot.adapters.database import MigrationRunner, SqliteDatabase
 from yukibot.features.forwarder import (
-    FORWARDER_MIGRATIONS,
     ContentType,
     DestinationEndpoint,
     ForwardMode,
@@ -14,6 +13,9 @@ from yukibot.features.forwarder import (
     Route,
     RouteCycleError,
     SourceEndpoint,
+)
+from yukibot.features.forwarder.migrations import FORWARDER_MIGRATIONS
+from yukibot.features.forwarder.repository import (
     SqliteMessageLinkRepository,
     SqliteRouteRepository,
 )

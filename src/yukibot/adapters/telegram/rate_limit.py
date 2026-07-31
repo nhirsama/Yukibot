@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 
 
 class SlidingWindowRateLimiter:
@@ -43,3 +44,28 @@ class SlidingWindowRateLimiter:
         threshold = now - self._period
         while self._events and self._events[0] <= threshold:
             self._events.popleft()
+
+
+class TelegramRequestLimiter:
+    """Share account concurrency and serialize operations for each destination chat."""
+
+    def __init__(self, *, max_concurrency: int = 4, messages_per_second: int = 20) -> None:
+        if max_concurrency <= 0:
+            raise ValueError("max_concurrency must be positive")
+        if messages_per_second <= 0:
+            raise ValueError("messages_per_second must be positive")
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._messages_per_second = messages_per_second
+        self._chat_locks: dict[int, asyncio.Lock] = {}
+        self._chat_limiters: dict[int, SlidingWindowRateLimiter] = {}
+
+    @asynccontextmanager
+    async def slot(self, chat_id: int) -> AsyncIterator[None]:
+        chat_lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
+        limiter = self._chat_limiters.setdefault(
+            chat_id,
+            SlidingWindowRateLimiter(self._messages_per_second, 1.0),
+        )
+        async with chat_lock, self._semaphore:
+            await limiter.acquire()
+            yield

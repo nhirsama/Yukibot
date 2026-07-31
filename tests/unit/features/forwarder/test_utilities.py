@@ -1,6 +1,7 @@
 import asyncio
 
-from yukibot.features.forwarder import AlbumBuffer, SlidingWindowRateLimiter
+from yukibot.adapters.telegram import SlidingWindowRateLimiter
+from yukibot.features.forwarder import AlbumBuffer
 
 
 async def test_album_buffer_uses_sliding_window_and_sorts_items() -> None:

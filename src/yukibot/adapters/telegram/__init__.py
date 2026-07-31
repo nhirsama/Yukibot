@@ -8,14 +8,15 @@ from .client import (
     peer_dialog_id,
 )
 from .event_source import TelethonEventSource, normalize_message
-from .gateway import TelethonGateway
+from .rate_limit import SlidingWindowRateLimiter, TelegramRequestLimiter
 
 __all__ = [
     "NativeClient",
     "PeerRegistry",
+    "SlidingWindowRateLimiter",
+    "TelegramRequestLimiter",
     "TelethonClientLifecycle",
     "TelethonEventSource",
-    "TelethonGateway",
     "create_telethon_client",
     "normalize_message",
     "peer_dialog_id",

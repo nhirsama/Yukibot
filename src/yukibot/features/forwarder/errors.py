@@ -25,6 +25,10 @@ class DeliveryResultMismatch(ForwarderError):
     """Telegram returned a different number of messages than the module sent."""
 
 
+class PartialDeliveryState(ForwarderError):
+    """Only part of an album has a persisted destination mapping."""
+
+
 class RouteCycleError(ForwarderError, ValueError):
     """Enabled routes contain a forwarding cycle."""
 

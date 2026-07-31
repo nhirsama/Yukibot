@@ -147,21 +147,36 @@ class PeerRegistry:
 
 
 class TelethonClientLifecycle:
-    """Own disconnection separately so update intake can stop before feature draining."""
+    """Connect and authorize before features start, then disconnect after they drain."""
 
     name = "telegram-client"
 
     def __init__(self, client: NativeClient, peers: PeerRegistry) -> None:
         self._client = client
         self._peers = peers
+        self._started = False
 
     async def start(self) -> None:
-        return None
+        if self._started:
+            return
+        try:
+            await self._client.connect()
+            if not await self._client.is_authorized():
+                await self._client.interactive_login()
+            dialogs = await self._client.get_dialogs()
+            for dialog in dialogs:
+                self._peers.remember(dialog.chat)
+        except BaseException:
+            await self._client.disconnect()
+            self._peers.clear()
+            raise
+        self._started = True
 
     async def stop(self) -> None:
         try:
             await self._client.disconnect()
         finally:
+            self._started = False
             self._peers.clear()
 
 

@@ -521,6 +521,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
+    { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "telethon" },
 ]
@@ -537,6 +538,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.21,<1" },
+    { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
     { name = "telethon", url = "https://codeberg.org/Lonami/Telethon/archive/570b7e5b03459cb5bd1c81bc1282f3cc4b8ed009.tar.gz", subdirectory = "client" },
 ]

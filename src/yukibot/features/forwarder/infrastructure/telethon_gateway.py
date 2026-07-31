@@ -2,26 +2,27 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Sequence
 from io import BytesIO
 from typing import cast
 
-from yukibot.features.forwarder import (
-    ContentType,
-    DestinationEndpoint,
-    ForwardMode,
-    IncomingMessage,
+from yukibot.adapters.telegram.client import (
+    NativeClient,
+    NativeMessage,
+    NativePeer,
+    PeerRegistry,
+    peer_dialog_id,
+)
+from yukibot.adapters.telegram.rate_limit import TelegramRequestLimiter
+
+from ..errors import (
     MessageNotFound,
     MessageNotModified,
-    MessageRef,
     NativeForwardUnsupported,
     PermanentDeliveryError,
     RetryAfter,
-    SlidingWindowRateLimiter,
 )
-
-from .client import NativeClient, NativeMessage, NativePeer, PeerRegistry, peer_dialog_id
+from ..models import ContentType, DestinationEndpoint, ForwardMode, IncomingMessage, MessageRef
 
 
 class TelethonGateway:
@@ -30,6 +31,7 @@ class TelethonGateway:
         client: NativeClient,
         peers: PeerRegistry,
         *,
+        request_limiter: TelegramRequestLimiter | None = None,
         max_concurrency: int = 4,
         messages_per_second: int = 20,
     ) -> None:
@@ -39,9 +41,10 @@ class TelethonGateway:
             raise ValueError("messages_per_second must be positive")
         self._client = client
         self._peers = peers
-        self._semaphore = asyncio.Semaphore(max_concurrency)
-        self._rate = messages_per_second
-        self._limiters: dict[int, SlidingWindowRateLimiter] = {}
+        self._request_limiter = request_limiter or TelegramRequestLimiter(
+            max_concurrency=max_concurrency,
+            messages_per_second=messages_per_second,
+        )
 
     async def deliver_message(
         self,
@@ -51,7 +54,7 @@ class TelethonGateway:
         mode: ForwardMode,
         reply_to_message_id: int | None,
     ) -> MessageRef:
-        async with self._delivery_slot(destination.chat_id):
+        async with self._request_limiter.slot(destination.chat_id):
             try:
                 native = await self._get_message(message.ref)
                 target = self._peer(destination.chat_id)
@@ -76,7 +79,7 @@ class TelethonGateway:
         mode: ForwardMode,
         reply_to_message_id: int | None,
     ) -> Sequence[MessageRef]:
-        async with self._delivery_slot(destination.chat_id):
+        async with self._request_limiter.slot(destination.chat_id):
             try:
                 native = tuple([await self._get_message(message.ref) for message in messages])
                 target = self._peer(destination.chat_id)
@@ -100,7 +103,7 @@ class TelethonGateway:
         *,
         reply_to_message_id: int | None,
     ) -> MessageRef:
-        async with self._delivery_slot(destination.chat_id):
+        async with self._request_limiter.slot(destination.chat_id):
             try:
                 result = await self._client.send_message(
                     self._peer(destination.chat_id),
@@ -112,7 +115,7 @@ class TelethonGateway:
                 raise _translate_error(error) from error
 
     async def edit_from_source(self, source: IncomingMessage, target: MessageRef) -> None:
-        async with self._delivery_slot(target.chat_id):
+        async with self._request_limiter.slot(target.chat_id):
             try:
                 native_source = await self._get_message(source.ref)
                 html = native_source.text_html
@@ -126,7 +129,7 @@ class TelethonGateway:
                 raise _translate_error(error) from error
 
     async def delete_message(self, target: MessageRef) -> None:
-        async with self._delivery_slot(target.chat_id):
+        async with self._request_limiter.slot(target.chat_id):
             try:
                 await self._client.delete_messages(
                     self._peer(target.chat_id), [target.message_id], revoke=True
@@ -221,32 +224,6 @@ class TelethonGateway:
                 f"chat {chat_id} is not in the Telethon peer cache; open or join it first"
             )
         return peer
-
-    def _delivery_slot(self, chat_id: int) -> _DeliverySlot:
-        limiter = self._limiters.setdefault(chat_id, SlidingWindowRateLimiter(self._rate, 1.0))
-        return _DeliverySlot(self._semaphore, limiter)
-
-
-class _DeliverySlot:
-    def __init__(self, semaphore: asyncio.Semaphore, limiter: SlidingWindowRateLimiter) -> None:
-        self._semaphore = semaphore
-        self._limiter = limiter
-
-    async def __aenter__(self) -> None:
-        await self._semaphore.acquire()
-        try:
-            await self._limiter.acquire()
-        except BaseException:
-            self._semaphore.release()
-            raise
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: object | None,
-    ) -> None:
-        self._semaphore.release()
 
 
 def _effective_reply(

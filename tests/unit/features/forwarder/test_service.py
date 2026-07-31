@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 from conftest import FakeTelegramGateway
@@ -17,6 +18,7 @@ from yukibot.features.forwarder import (
     MessageLink,
     MessageRef,
     MessagesDeleted,
+    PartialDeliveryState,
     Route,
     ServiceKind,
     ServiceMessage,
@@ -30,7 +32,7 @@ def make_message(
     text: str = "hello",
     topic_id: int | None = None,
     reply_to: int | None = None,
-    media_group_id: int | None = None,
+    grouped_id: int | None = None,
     content_type: ContentType = ContentType.TEXT,
     service: ServiceMessage | None = None,
 ) -> IncomingMessage:
@@ -41,7 +43,7 @@ def make_message(
         topic_id=topic_id,
         text=None if service else text,
         reply_to_message_id=reply_to,
-        media_group_id=media_group_id,
+        grouped_id=grouped_id,
         service=service,
     )
 
@@ -92,15 +94,33 @@ async def test_native_forward_can_fall_back_to_copy() -> None:
     assert not report.failures
 
 
+async def test_concurrent_duplicate_message_is_delivered_once() -> None:
+    route = Route(1, SourceEndpoint(-1001), DestinationEndpoint(-2001))
+    telegram = FakeTelegramGateway()
+    service = ForwarderService(
+        InMemoryRouteRepository([route]), InMemoryMessageLinkRepository(), telegram
+    )
+    event = make_message(10)
+
+    first, second = await asyncio.gather(
+        service.forward_message(event),
+        service.forward_message(event),
+    )
+
+    assert len(telegram.calls) == 1
+    assert first.delivered_messages + second.delivered_messages == 1
+    assert first.deduplicated_messages + second.deduplicated_messages == 1
+
+
 async def test_album_is_sorted_and_each_item_is_mapped() -> None:
     route = Route(1, SourceEndpoint(-1001), DestinationEndpoint(-2001))
     links = InMemoryMessageLinkRepository()
     telegram = FakeTelegramGateway()
     service = ForwarderService(InMemoryRouteRepository([route]), links, telegram)
     album = (
-        make_message(12, media_group_id=50, content_type=ContentType.PHOTO),
-        make_message(10, media_group_id=50, content_type=ContentType.PHOTO),
-        make_message(11, media_group_id=50, content_type=ContentType.VIDEO),
+        make_message(12, grouped_id=50, content_type=ContentType.PHOTO),
+        make_message(10, grouped_id=50, content_type=ContentType.PHOTO),
+        make_message(11, grouped_id=50, content_type=ContentType.VIDEO),
     )
 
     report = await service.forward_album(album)
@@ -108,6 +128,28 @@ async def test_album_is_sorted_and_each_item_is_mapped() -> None:
     assert [item.ref.message_id for item in telegram.calls[0].messages] == [10, 11, 12]
     assert report.delivered_messages == 3
     assert await links.count() == 3
+
+    replay = await service.forward_album(album)
+    assert len(telegram.calls) == 1
+    assert replay.delivered_messages == 0
+    assert replay.deduplicated_messages == 3
+
+
+async def test_partial_album_mapping_is_not_resent() -> None:
+    route = Route(1, SourceEndpoint(-1001), DestinationEndpoint(-2001))
+    first = MessageLink(1, MessageRef(-1001, 10), MessageRef(-2001, 100))
+    links = InMemoryMessageLinkRepository([first])
+    telegram = FakeTelegramGateway()
+    service = ForwarderService(InMemoryRouteRepository([route]), links, telegram)
+    album = (
+        make_message(10, grouped_id=50, content_type=ContentType.PHOTO),
+        make_message(11, grouped_id=50, content_type=ContentType.PHOTO),
+    )
+
+    report = await service.forward_album(album)
+
+    assert not telegram.calls
+    assert isinstance(report.failures[0].error, PartialDeliveryState)
 
 
 async def test_service_message_is_rendered_as_plain_text() -> None:
@@ -144,7 +186,9 @@ async def test_edit_and_delete_are_synchronized_for_every_route() -> None:
     edited = make_message(10, text="edited")
 
     edit_report = await service.synchronize_edit(edited)
-    delete_report = await service.synchronize_delete(MessagesDeleted((10,), chat_id=-1001))
+    delete_report = await service.synchronize_delete(
+        MessagesDeleted((10,), datetime.now(UTC), chat_id=-1001)
+    )
 
     assert edit_report.synchronized == 2
     assert delete_report.synchronized == 2
@@ -158,7 +202,7 @@ async def test_delete_without_chat_id_is_ignored_by_default() -> None:
     telegram = FakeTelegramGateway()
     service = ForwarderService(InMemoryRouteRepository(), links, telegram)
 
-    report = await service.synchronize_delete(MessagesDeleted((10,)))
+    report = await service.synchronize_delete(MessagesDeleted((10,), datetime.now(UTC)))
 
     assert report.ignored_reason == "source_chat_unknown"
     assert not telegram.deletes
@@ -180,7 +224,7 @@ async def test_ambiguous_delete_can_be_explicitly_enabled() -> None:
         ForwarderOptions(allow_ambiguous_deletes=True),
     )
 
-    report = await service.synchronize_delete(MessagesDeleted((10,)))
+    report = await service.synchronize_delete(MessagesDeleted((10,), datetime.now(UTC)))
 
     assert report.synchronized == 2
     assert await links.count() == 0

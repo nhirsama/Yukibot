@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -10,6 +11,7 @@ from .errors import (
     MessageNotFound,
     MessageNotModified,
     NativeForwardUnsupported,
+    PartialDeliveryState,
 )
 from .models import (
     ForwardMode,
@@ -34,6 +36,7 @@ class DeliveryOutcome:
     sources: tuple[MessageRef, ...]
     destinations: tuple[MessageRef, ...]
     mode_used: ForwardMode
+    deduplicated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +56,13 @@ class ForwardingReport:
 
     @property
     def delivered_messages(self) -> int:
-        return sum(len(outcome.destinations) for outcome in self.outcomes)
+        return sum(
+            len(outcome.destinations) for outcome in self.outcomes if not outcome.deduplicated
+        )
+
+    @property
+    def deduplicated_messages(self) -> int:
+        return sum(len(outcome.destinations) for outcome in self.outcomes if outcome.deduplicated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +95,7 @@ class ForwarderService:
     links: MessageLinkRepository
     telegram: TelegramGateway
     options: ForwarderOptions = field(default_factory=ForwarderOptions)
+    _route_locks: dict[int, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
 
     async def forward_message(self, message: IncomingMessage) -> ForwardingReport:
         if message.outgoing:
@@ -97,16 +107,29 @@ class ForwarderService:
         failures: list[DeliveryFailure] = []
 
         for route in matched:
-            try:
-                reply_to = await self._resolve_reply(message, route)
-                destination, mode_used = await self._deliver_one(message, route, reply_to)
-                link = MessageLink(route.id, message.ref, destination)
-                await self.links.save_many((link,))
-                outcomes.append(
-                    DeliveryOutcome(route.id, (message.ref,), (destination,), mode_used)
-                )
-            except Exception as error:
-                failures.append(DeliveryFailure(route.id, (message.ref,), error))
+            async with self._route_lock(route.id):
+                try:
+                    existing = await self.links.get(route.id, message.ref)
+                    if existing is not None:
+                        outcomes.append(
+                            DeliveryOutcome(
+                                route.id,
+                                (message.ref,),
+                                (existing.destination,),
+                                route.mode,
+                                deduplicated=True,
+                            )
+                        )
+                        continue
+                    reply_to = await self._resolve_reply(message, route)
+                    destination, mode_used = await self._deliver_one(message, route, reply_to)
+                    link = MessageLink(route.id, message.ref, destination)
+                    await self.links.save_many((link,))
+                    outcomes.append(
+                        DeliveryOutcome(route.id, (message.ref,), (destination,), mode_used)
+                    )
+                except Exception as error:
+                    failures.append(DeliveryFailure(route.id, (message.ref,), error))
 
         return ForwardingReport(tuple(outcomes), tuple(failures), len(matched))
 
@@ -123,22 +146,42 @@ class ForwarderService:
         failures: list[DeliveryFailure] = []
 
         for route in matched:
-            try:
-                reply_to = await self._resolve_reply(first, route)
-                destinations, mode_used = await self._deliver_album(ordered, route, reply_to)
-                if len(destinations) != len(ordered):
-                    raise DeliveryResultMismatch(
-                        f"sent {len(ordered)} album items but received "
-                        f"{len(destinations)} destination references"
+            async with self._route_lock(route.id):
+                try:
+                    existing = tuple([await self.links.get(route.id, source) for source in sources])
+                    if all(link is not None for link in existing):
+                        destinations = tuple(
+                            link.destination for link in existing if link is not None
+                        )
+                        outcomes.append(
+                            DeliveryOutcome(
+                                route.id,
+                                sources,
+                                destinations,
+                                route.mode,
+                                deduplicated=True,
+                            )
+                        )
+                        continue
+                    if any(link is not None for link in existing):
+                        raise PartialDeliveryState(
+                            f"route {route.id} has an incomplete persisted album mapping"
+                        )
+                    reply_to = await self._resolve_reply(first, route)
+                    destinations, mode_used = await self._deliver_album(ordered, route, reply_to)
+                    if len(destinations) != len(ordered):
+                        raise DeliveryResultMismatch(
+                            f"sent {len(ordered)} album items but received "
+                            f"{len(destinations)} destination references"
+                        )
+                    links = tuple(
+                        MessageLink(route.id, source, destination)
+                        for source, destination in zip(sources, destinations, strict=True)
                     )
-                links = tuple(
-                    MessageLink(route.id, source, destination)
-                    for source, destination in zip(sources, destinations, strict=True)
-                )
-                await self.links.save_many(links)
-                outcomes.append(DeliveryOutcome(route.id, sources, destinations, mode_used))
-            except Exception as error:
-                failures.append(DeliveryFailure(route.id, sources, error))
+                    await self.links.save_many(links)
+                    outcomes.append(DeliveryOutcome(route.id, sources, destinations, mode_used))
+                except Exception as error:
+                    failures.append(DeliveryFailure(route.id, sources, error))
 
         return ForwardingReport(tuple(outcomes), tuple(failures), len(matched))
 
@@ -253,6 +296,9 @@ class ForwarderService:
         mapping = await self.links.get(route.id, parent)
         return mapping.destination.message_id if mapping is not None else None
 
+    def _route_lock(self, route_id: int) -> asyncio.Lock:
+        return self._route_locks.setdefault(route_id, asyncio.Lock())
+
     async def _links_for_delete(self, event: MessagesDeleted) -> tuple[MessageLink, ...]:
         found: dict[tuple[int, MessageRef], MessageLink] = {}
         for message_id in event.message_ids:
@@ -271,11 +317,11 @@ class ForwarderService:
         if not messages:
             raise ValueError("an album must contain at least one message")
         first = messages[0]
-        if first.media_group_id is None:
-            raise ValueError("album messages must have a media_group_id")
-        expected = (first.ref.chat_id, first.topic_id, first.media_group_id)
+        if first.grouped_id is None:
+            raise ValueError("album messages must have a grouped_id")
+        expected = (first.ref.chat_id, first.topic_id, first.grouped_id)
         if any(
-            (message.ref.chat_id, message.topic_id, message.media_group_id) != expected
+            (message.ref.chat_id, message.topic_id, message.grouped_id) != expected
             for message in messages
         ):
             raise ValueError("album messages must belong to the same chat, topic and media group")

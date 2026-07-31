@@ -1,6 +1,6 @@
 # Yukibot 架构设计
 
-> 状态：基础框架已实现；可靠任务阶段待实现
+> 状态：基础框架与 Forwarder 持久任务已实现；管理面待实现
 > 语言：Python 3.12+  
 > 包与环境管理：uv  
 > Telegram 客户端：Telethon  
@@ -45,8 +45,9 @@ Yukibot 是运行在 Telegram 用户账号上的自动化程序。首个功能�
 
 - `kernel` 只包含生命周期、事件分发等与 Telegram 无关的机制。
 - `contracts` 只包含不可变数据契约和少量协议，不包含业务实现。
-- `adapters` 实现外部系统接入，例如 Telethon、SQLite 和系统时钟。
-- `features` 只依赖契约和自己定义的端口，不依赖 Telethon、其他功能实现或组合根。
+- `adapters` 提供跨功能的外部系统接入，例如 Telethon client/event source、SQLite 和日志。
+- `features` 的业务核心只依赖契约和自己定义的端口，不依赖 Telethon、其他功能实现或组合根。
+- 功能专用的外层 adapter 归该功能所有，可以依赖通用 adapter 的窄接口，但不得进入业务核心。
 - `bootstrap` 是唯一可以知道所有具体实现并把它们组装起来的位置。
 
 ### 4.2 功能拥有自己的数据
@@ -119,7 +120,7 @@ yukibot/
 │   │   ├── telegram/
 │   │   │   ├── client.py
 │   │   │   ├── event_source.py
-│   │   │   └── gateway.py
+│   │   │   └── rate_limit.py
 │   │   ├── database/
 │   │   │   ├── connection.py
 │   │   │   └── migrations.py
@@ -129,14 +130,16 @@ yukibot/
 │   └── features/
 │       └── forwarder/
 │           ├── feature.py
-│           ├── contracts.py
 │           ├── models.py
 │           ├── ports.py
 │           ├── service.py
-│           ├── handlers.py
+│           ├── jobs.py
+│           ├── job_repository.py
 │           ├── repository.py     # 基于 Database 契约的本功能实现
+│           ├── migrations.py
 │           ├── worker.py
-│           └── migrations/
+│           └── infrastructure/
+│               └── telethon_gateway.py
 └── tests/
     ├── unit/
     ├── integration/
@@ -309,15 +312,13 @@ MessageLink
 - source_message_id
 - destination_chat_id
 - destination_message_id
-- grouped_id
 
 ForwardJob
 - id
-- route_id
-- source_chat_id
-- source_message_id
-- kind: create | edit | delete
+- kind: receive | edit | delete
 - deduplication_key
+- group_key
+- payload_json
 - state: pending | processing | succeeded | failed
 - attempts
 - available_at
@@ -330,7 +331,9 @@ ForwardJob
 UNIQUE(deduplication_key)
 ```
 
-`deduplication_key` 由 route、源消息、操作类型和事件版本组成。create/delete 各自只有一个稳定键；edit 必须包含 Telegram 提供的编辑时间或内容版本，因此同一次编辑重放会被去重，但后续编辑仍能正常执行。该约束是事件重放和重试时避免重复发送的最后一道防线。
+`deduplication_key` 由操作类型、源会话、源消息和事件版本组成。receive/delete 使用稳定消息键；edit
+包含 Telegram 编辑时间与可编辑内容指纹，因此同一次编辑重放会被去重，秒级时间戳内的连续编辑仍能
+执行。worker 重试整个事件时，已成功 route 的 `MessageLink` 会在副作用前被识别，避免再次发送。
 
 ### 8.3 处理流程
 
@@ -338,9 +341,9 @@ UNIQUE(deduplication_key)
 Telethon update
     -> TelegramMessageReceived
     -> Forwarder handler
-    -> 查询匹配路由并写入 ForwardJob
+    -> 幂等写入 ForwardJob
     -> worker 领取任务
-    -> 过滤与回复映射
+    -> 查询路由、过滤与回复映射
     -> Telegram gateway
     -> 写入 MessageLink
     -> 标记任务完成
@@ -350,10 +353,9 @@ handler 只做快速校验和任务落库，不在 Telethon update 回调里下�
 
 ### 8.4 顺序与并发
 
-- 同一个目标 chat/topic 使用同一逻辑队列，按源消息顺序处理。
-- 不同目标可以并发发送。
-- worker 数量和队列上限来自配置。
-- 领取任务时使用带租约的 `processing` 状态；进程异常退出后，超时任务可重新变为 `pending`。
+- 单 worker 按 job ID 顺序处理，Telegram request limiter 额外串行化同一个目标 chat。
+- 当前不并发执行不同目标；只有吞吐数据证明需要时才引入按目标分区的 worker。
+- 领取任务时进入 `processing`；单实例进程重启时将未完成任务恢复为 `pending`。
 - 相册按 `grouped_id` 在短时间窗口内聚合，再作为一个任务提交。
 - 编辑或删除早于 create 完成时，延后该任务，而不是直接丢弃。
 
@@ -365,7 +367,7 @@ SQLite 单实例部署可以使用事务更新完成任务领取。未来切换 
 
 - 每个目标会话独立限速，同时设置账号级并发上限。
 - `FloodWait` 使用服务端要求的等待时间，不做忙循环。
-- 网络超时和临时 RPC 错误使用有上限的指数退避并加入 jitter。
+- 网络超时和临时 RPC 错误使用有上限的指数退避。
 - 权限错误、无效目标、受保护内容等永久错误不自动无限重试。
 - 日志中记录 route、source、destination、attempt 和错误分类，但不记录 session 或敏感正文。
 
@@ -388,8 +390,7 @@ YUKIBOT_TELEGRAM_API_HASH
 YUKIBOT_TELEGRAM_SESSION_PATH
 YUKIBOT_DATABASE_URL
 YUKIBOT_LOG_LEVEL
-YUKIBOT_ADMIN_IDS
-YUKIBOT_FORWARDER_WORKERS
+YUKIBOT_FORWARDER_ALBUM_DELAY
 ```
 
 规则：
@@ -419,17 +420,18 @@ YUKIBOT_FORWARDER_WORKERS
 2. 初始化结构化日志
 3. 打开数据库并执行迁移
 4. 创建 EventBus 和 Task Supervisor
-5. 创建 Telethon gateway
-6. 构造并注册 features
-7. 启动 feature workers
-8. 登录并启动 Telethon event source
+5. 连接并授权 Telethon，加载初始 peer
+6. 创建 gateway，构造并注册 features
+7. 恢复中断任务并启动 feature worker
+8. 注册并启动 Telethon event source
 9. 等待 SIGINT / SIGTERM
 10. 停止接收新 update
-11. 等待进行中的任务到达关闭超时
+11. 等待正在执行的 update handler 和任务到达关闭超时
 12. 停止 features、关闭 Telethon 和数据库
 ```
 
-建议使用 `asyncio.TaskGroup` 管理长期任务，并通过统一 shutdown event 协调关闭。启动中任一步失败，都应逆序释放已经创建的资源。
+长期任务统一交给 `TaskSupervisor` 持有，critical worker 失败会触发应用关闭。启动中任一步失败，
+`LifecycleManager` 都会逆序释放已经创建的资源。
 
 ## 12. 管理命令
 
@@ -485,7 +487,7 @@ error_type
 
 - migrations；
 - repository；
-- job 领取、租约和恢复；
+- job 去重、相册批量领取、重试和恢复；
 - 唯一约束和事务行为。
 
 ### 14.3 契约测试
@@ -497,7 +499,7 @@ error_type
 ```text
 tests/unit/features/forwarder/test_service.py
 tests/integration/features/forwarder/test_repository.py
-tests/contract/adapters/telegram/test_gateway.py
+tests/contract/features/forwarder/test_telethon_gateway.py
 ```
 
 ## 15. uv 与工程工具
@@ -580,12 +582,12 @@ uv add "telethon @ git+https://codeberg.org/Lonami/Telethon.git@<verified-tag-or
 - EventBus 和显式功能注册；
 - 单路由文字消息转发。
 
-### 阶段二：可靠转发
+### 阶段二：可靠转发（主体已实现）
 
 - 路由管理；
-- ForwardJob 和 MessageLink；
+- ForwardJob、MessageLink 和启动恢复；
 - 媒体、相册、回复、编辑和删除；
-- 限流、重试、幂等和恢复。
+- 限流、重试、重放幂等和恢复。
 
 ### 阶段三：验证扩展性
 

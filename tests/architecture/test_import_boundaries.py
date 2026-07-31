@@ -47,6 +47,15 @@ def test_contracts_and_kernel_do_not_depend_on_outer_layers() -> None:
     assert violations == []
 
 
+def test_generic_adapters_do_not_depend_on_features() -> None:
+    violations: list[str] = []
+    for source in (SOURCE_ROOT / "adapters").rglob("*.py"):
+        for module in imported_modules(source):
+            if module.startswith("yukibot.features"):
+                violations.append(f"{source}: {module}")
+    assert violations == []
+
+
 def test_external_sdks_only_exist_in_adapters() -> None:
     violations: list[str] = []
     for source in SOURCE_ROOT.rglob("*.py"):
@@ -69,3 +78,22 @@ def test_forwarder_core_does_not_depend_on_framework() -> None:
             if module.startswith(("yukibot.adapters", "yukibot.kernel")):
                 violations.append(f"{source}: {module}")
     assert violations == []
+
+
+def test_forwarder_public_api_does_not_eagerly_load_integration_layers() -> None:
+    source = SOURCE_ROOT / "features" / "forwarder" / "__init__.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    integration_modules = {
+        "feature",
+        "infrastructure",
+        "job_repository",
+        "migrations",
+        "repository",
+        "worker",
+    }
+    imported = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.level > 0 and node.module
+    }
+    assert imported.isdisjoint(integration_modules)

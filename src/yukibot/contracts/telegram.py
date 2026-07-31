@@ -71,6 +71,7 @@ class TelegramMessage:
     reply_to_message_id: int | None = None
     service: TelegramServiceMessage | None = None
     outgoing: bool = False
+    edited_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.topic_id is not None and self.topic_id < 0:
@@ -81,3 +82,7 @@ class TelegramMessage:
             raise ValueError("service details are required for service messages")
         if self.service is not None and self.content_type is not TelegramContentType.SERVICE:
             raise ValueError("service details are only valid for service messages")
+
+    @property
+    def searchable_text(self) -> str:
+        return self.text or self.caption or ""

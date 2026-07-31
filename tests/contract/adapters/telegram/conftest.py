@@ -32,6 +32,7 @@ class FakeRaw:
     media: object = field(default_factory=MessageMediaEmpty)
     reply_to: object | None = None
     action: object | None = None
+    edit_date: object | None = None
 
 
 @dataclass

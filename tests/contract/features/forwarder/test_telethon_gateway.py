@@ -1,3 +1,5 @@
+"""Contract tests for the forwarder-owned Telethon gateway."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -11,7 +13,7 @@ from tests.contract.adapters.telegram.conftest import (
     FakeRaw,
     MessageMediaEmpty,
 )
-from yukibot.adapters.telegram import PeerRegistry, TelethonGateway
+from yukibot.adapters.telegram import PeerRegistry
 from yukibot.features.forwarder import (
     ContentType,
     DestinationEndpoint,
@@ -22,6 +24,7 @@ from yukibot.features.forwarder import (
     RetryAfter,
     TelegramGateway,
 )
+from yukibot.features.forwarder.infrastructure import TelethonGateway
 
 
 def domain_message(
@@ -31,7 +34,7 @@ def domain_message(
         MessageRef(-1001, message_id),
         content_type,
         datetime.now(UTC),
-        media_group_id=50 if content_type is not ContentType.TEXT else None,
+        grouped_id=50 if content_type is not ContentType.TEXT else None,
         text="hello" if content_type is ContentType.TEXT else None,
         caption="caption" if content_type is not ContentType.TEXT else None,
     )

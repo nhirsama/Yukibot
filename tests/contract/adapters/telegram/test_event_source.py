@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -86,6 +87,19 @@ def test_normalize_photo_caption_and_forum_topic() -> None:
     assert normalized.sender_id == 42
 
 
+def test_normalize_edit_timestamp_from_raw_message() -> None:
+    edited_at = datetime(2026, 1, 2, tzinfo=UTC)
+    message = FakeMessage(
+        10,
+        FakePeer(-1001),
+        _raw=FakeRaw(edit_date=int(edited_at.timestamp())),
+    )
+
+    normalized = normalize_message(message, datetime.now(UTC))
+
+    assert normalized.edited_at == edited_at
+
+
 def test_normalize_service_topic_creation() -> None:
     message = FakeMessage(55, FakePeer(-1001), text=None, text_html=None, _raw=MessageService())
 
@@ -119,8 +133,10 @@ async def test_event_source_lifecycle_and_event_publication(monkeypatch) -> None
 
     bus.subscribe(TelegramMessageReceived, on_message)
     bus.subscribe(TelegramMessagesDeleted, on_delete)
+    connection = TelethonClientLifecycle(client, peers)  # type: ignore[arg-type]
     source = TelethonEventSource(client, bus, peers)  # type: ignore[arg-type]
 
+    await connection.start()
     await source.start()
     assert client.connected
     assert client.logged_in
@@ -140,7 +156,46 @@ async def test_event_source_lifecycle_and_event_publication(monkeypatch) -> None
     assert not client.disconnected
     assert peers.get(-2001) is not None
 
-    connection = TelethonClientLifecycle(client, peers)  # type: ignore[arg-type]
     await connection.stop()
     assert client.disconnected
     assert peers.get(-2001) is None
+
+
+async def test_event_source_drains_inflight_handlers_before_stopping(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "yukibot.adapters.telegram.event_source.telethon_event_types",
+        lambda: (NewEvent, EditEvent, DeleteEvent),
+    )
+    client = FakeNativeClient()
+    bus = InProcessEventBus()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_handler(event: TelegramMessageReceived) -> None:
+        entered.set()
+        await release.wait()
+
+    bus.subscribe(TelegramMessageReceived, slow_handler)
+    peers = PeerRegistry()
+    source = TelethonEventSource(
+        client,
+        bus,
+        peers,
+        drain_timeout=0.2,
+    )  # type: ignore[arg-type]
+    connection = TelethonClientLifecycle(client, peers)  # type: ignore[arg-type]
+    await connection.start()
+    await source.start()
+
+    handling = asyncio.create_task(
+        client.handlers[NewEvent](FakeMessage(1, FakePeer(-1001)))  # type: ignore[operator]
+    )
+    await entered.wait()
+    stopping = asyncio.create_task(source.stop())
+    await asyncio.sleep(0)
+
+    assert not stopping.done()
+    assert client.handlers == {}
+    release.set()
+    await asyncio.gather(handling, stopping)
+    await connection.stop()

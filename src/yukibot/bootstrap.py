@@ -2,31 +2,28 @@
 
 from __future__ import annotations
 
-import asyncio
-import logging
-from collections.abc import Coroutine
 from dataclasses import dataclass
-from typing import Any
 
 from yukibot.adapters.database import DatabaseLifecycle, SqliteDatabase
 from yukibot.adapters.telegram import (
     NativeClient,
     PeerRegistry,
+    TelegramRequestLimiter,
     TelethonClientLifecycle,
     TelethonEventSource,
-    TelethonGateway,
     create_telethon_client,
 )
 from yukibot.config import Settings
-from yukibot.features.forwarder import (
-    FORWARDER_MIGRATIONS,
-    Forwarder,
-    ForwarderFeature,
-    ForwarderService,
-    ForwardingReport,
+from yukibot.features.forwarder.feature import ForwarderFeature
+from yukibot.features.forwarder.infrastructure import TelethonGateway
+from yukibot.features.forwarder.job_repository import SqliteForwardJobRepository
+from yukibot.features.forwarder.migrations import FORWARDER_MIGRATIONS
+from yukibot.features.forwarder.repository import (
     SqliteMessageLinkRepository,
     SqliteRouteRepository,
 )
+from yukibot.features.forwarder.service import ForwarderService
+from yukibot.features.forwarder.worker import ForwardJobProcessor, ForwardJobRunner
 from yukibot.kernel import (
     Application,
     InProcessEventBus,
@@ -64,46 +61,27 @@ def build_runtime(
     )
     peers = PeerRegistry()
     telegram_client_lifecycle = TelethonClientLifecycle(client, peers)
-    telegram_gateway = TelethonGateway(client, peers)
+    request_limiter = TelegramRequestLimiter()
+    telegram_gateway = TelethonGateway(client, peers, request_limiter=request_limiter)
     routes = SqliteRouteRepository(database)
     links = SqliteMessageLinkRepository(database)
+    jobs = SqliteForwardJobRepository(database)
     service = ForwarderService(routes, links, telegram_gateway)
-
-    report_logger = logging.getLogger("yukibot.features.forwarder.background")
-
-    async def report_background(report: ForwardingReport) -> None:
-        report_logger.log(
-            logging.ERROR if report.failures else logging.INFO,
-            "album forwarding completed",
-            extra={
-                "feature": "forwarder",
-                "matched_routes": report.matched_routes,
-                "delivered_messages": report.delivered_messages,
-                "failure_count": len(report.failures),
-            },
-        )
-
-    def report_background_error(error: BaseException) -> None:
-        report_logger.error(
-            "album forwarding failed",
-            extra={"feature": "forwarder", "error_type": type(error).__name__},
-            exc_info=error,
-        )
-
-    def create_album_task(
-        coroutine: Coroutine[Any, Any, None],
-    ) -> asyncio.Task[None]:
-        return supervisor.create_task(coroutine, name="forwarder:album")
-
-    forwarder = Forwarder(
-        service,
-        album_flush_delay=settings.forwarder_album_delay,
-        on_background_report=report_background,
-        on_background_error=report_background_error,
-        task_factory=create_album_task,
+    processor = ForwardJobProcessor(service)
+    runner = ForwardJobRunner(jobs, processor)
+    forwarder_feature = ForwarderFeature(
+        bus,
+        runner,
+        supervisor,
+        album_delay=settings.forwarder_album_delay,
+        stop_timeout=settings.shutdown_timeout,
     )
-    forwarder_feature = ForwarderFeature(bus, forwarder)
-    telegram_source = TelethonEventSource(client, bus, peers)
+    telegram_source = TelethonEventSource(
+        client,
+        bus,
+        peers,
+        drain_timeout=settings.shutdown_timeout,
+    )
 
     lifecycle = LifecycleManager(
         (

@@ -1,27 +1,21 @@
-"""Framework integration layer for the reusable forwarder core."""
+"""Framework integration for durable forwarding jobs."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from collections.abc import Callable
 
 from yukibot.contracts import (
-    TelegramMessage,
     TelegramMessageEdited,
     TelegramMessageReceived,
     TelegramMessagesDeleted,
 )
-from yukibot.kernel import EventBus, Subscription
+from yukibot.kernel import EventBus, Subscription, TaskSupervisor
 
-from .forwarder import Forwarder
-from .models import (
-    ContentType,
-    IncomingMessage,
-    MessageRef,
-    MessagesDeleted,
-    ServiceKind,
-    ServiceMessage,
-)
-from .service import ForwardingReport, SyncReport
+from .jobs import ForwardJobEvent, pending_jobs_for_event
+from .worker import ForwardJobRunner
 
 
 class ForwarderFeature:
@@ -30,105 +24,104 @@ class ForwarderFeature:
     def __init__(
         self,
         bus: EventBus,
-        forwarder: Forwarder,
+        runner: ForwardJobRunner,
+        supervisor: TaskSupervisor,
         *,
+        album_delay: float = 0.8,
+        stop_timeout: float = 15.0,
+        clock: Callable[[], float] = time.time,
         logger: logging.Logger | None = None,
     ) -> None:
+        if album_delay < 0:
+            raise ValueError("album_delay must not be negative")
+        if stop_timeout <= 0:
+            raise ValueError("stop_timeout must be positive")
         self._bus = bus
-        self._forwarder = forwarder
+        self._runner = runner
+        self._supervisor = supervisor
+        self._album_delay = album_delay
+        self._stop_timeout = stop_timeout
+        self._clock = clock
         self._subscriptions: list[Subscription] = []
+        self._worker: asyncio.Task[None] | None = None
         self._logger = logger or logging.getLogger(__name__)
 
     async def start(self) -> None:
-        if self._subscriptions:
+        if self._worker is not None:
             return
-        self._subscriptions.extend(
-            (
-                self._bus.subscribe(TelegramMessageReceived, self._on_message),
-                self._bus.subscribe(TelegramMessageEdited, self._on_edit),
-                self._bus.subscribe(TelegramMessagesDeleted, self._on_delete),
-            )
+        recovered = await self._runner.prepare()
+        self._worker = self._supervisor.create_task(
+            self._runner.run(),
+            name="forwarder:worker",
+            critical=True,
         )
+        try:
+            self._subscriptions.append(
+                self._bus.subscribe(TelegramMessageReceived, self._on_message)
+            )
+            self._subscriptions.append(self._bus.subscribe(TelegramMessageEdited, self._on_edit))
+            self._subscriptions.append(
+                self._bus.subscribe(TelegramMessagesDeleted, self._on_delete)
+            )
+        except BaseException:
+            for subscription in self._subscriptions:
+                subscription.unsubscribe()
+            self._subscriptions.clear()
+            self._runner.request_stop()
+            self._worker.cancel()
+            await asyncio.gather(self._worker, return_exceptions=True)
+            self._worker = None
+            raise
+        self._runner.wake()
+        if recovered:
+            self._logger.warning(
+                "recovered interrupted forwarder jobs",
+                extra={"feature": self.name, "job_count": recovered},
+            )
 
     async def stop(self) -> None:
         for subscription in self._subscriptions:
             subscription.unsubscribe()
         self._subscriptions.clear()
-        await self._forwarder.close()
+
+        worker, self._worker = self._worker, None
+        if worker is None:
+            return
+        self._runner.request_stop()
+        try:
+            await asyncio.wait_for(asyncio.shield(worker), timeout=self._stop_timeout)
+        except TimeoutError:
+            self._logger.error(
+                "forwarder worker did not drain before timeout",
+                extra={"feature": self.name, "timeout": self._stop_timeout},
+            )
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+        except Exception:
+            await asyncio.gather(worker, return_exceptions=True)
 
     async def _on_message(self, event: TelegramMessageReceived) -> None:
-        report = await self._forwarder.handle_message(_to_incoming(event.message))
-        self._log_forward_report(report)
+        await self._enqueue(event)
 
     async def _on_edit(self, event: TelegramMessageEdited) -> None:
-        report = await self._forwarder.handle_edit(_to_incoming(event.message))
-        self._log_sync_report(report)
+        await self._enqueue(event)
 
     async def _on_delete(self, event: TelegramMessagesDeleted) -> None:
-        report = await self._forwarder.handle_delete(
-            MessagesDeleted(event.message_ids, chat_id=event.chat_id)
+        await self._enqueue(event)
+
+    async def _enqueue(self, event: ForwardJobEvent) -> None:
+        jobs = pending_jobs_for_event(
+            event,
+            now=self._clock(),
+            album_delay=self._album_delay,
         )
-        self._log_sync_report(report)
-
-    async def log_background_report(self, report: ForwardingReport) -> None:
-        self._log_forward_report(report)
-
-    def log_background_error(self, error: BaseException) -> None:
-        self._logger.error(
-            "forwarder album failed",
-            extra={"feature": self.name, "error_type": type(error).__name__},
-            exc_info=error,
-        )
-
-    def _log_forward_report(self, report: ForwardingReport) -> None:
-        level = logging.ERROR if report.failures else logging.INFO
-        self._logger.log(
-            level,
-            "forwarding completed",
+        inserted = await self._runner.enqueue(jobs)
+        self._logger.debug(
+            "forwarder event persisted",
             extra={
                 "feature": self.name,
-                "matched_routes": report.matched_routes,
-                "delivered_messages": report.delivered_messages,
-                "failure_count": len(report.failures),
-                "ignored_reason": report.ignored_reason,
-                "buffered": report.buffered,
+                "event_type": type(event).__name__,
+                "job_count": inserted,
+                "deduplicated": inserted == 0,
             },
         )
-
-    def _log_sync_report(self, report: SyncReport) -> None:
-        level = logging.ERROR if report.failures else logging.INFO
-        self._logger.log(
-            level,
-            "forwarder synchronization completed",
-            extra={
-                "feature": self.name,
-                "operation": report.operation.value,
-                "synchronized": report.synchronized,
-                "failure_count": len(report.failures),
-                "ignored_reason": report.ignored_reason,
-            },
-        )
-
-
-def _to_incoming(message: TelegramMessage) -> IncomingMessage:
-    service = None
-    if message.service is not None:
-        service = ServiceMessage(
-            kind=ServiceKind(message.service.kind.value),
-            actor_name=message.service.actor_name,
-            member_names=message.service.member_names,
-            new_title=message.service.new_title,
-        )
-    return IncomingMessage(
-        ref=MessageRef(message.ref.chat_id, message.ref.message_id),
-        content_type=ContentType(message.content_type.value),
-        occurred_at=message.occurred_at,
-        topic_id=message.topic_id,
-        sender_id=message.sender_id,
-        text=message.text,
-        caption=message.caption,
-        reply_to_message_id=message.reply_to_message_id,
-        media_group_id=message.grouped_id,
-        service=service,
-        outgoing=message.outgoing,
-    )

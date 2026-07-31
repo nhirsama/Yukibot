@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from .telegram import TelegramMessage
 
@@ -21,7 +21,7 @@ class TelegramMessageEdited:
 @dataclass(frozen=True, slots=True)
 class TelegramMessagesDeleted:
     message_ids: tuple[int, ...]
-    occurred_at: datetime
+    occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     chat_id: int | None = None
 
     def __post_init__(self) -> None:

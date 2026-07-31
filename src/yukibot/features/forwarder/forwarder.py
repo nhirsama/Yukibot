@@ -32,9 +32,9 @@ class Forwarder:
         )
 
     async def handle_message(self, message: IncomingMessage) -> ForwardingReport:
-        if message.media_group_id is None:
+        if message.grouped_id is None:
             return await self._service.forward_message(message)
-        key = (message.ref.chat_id, message.media_group_id)
+        key = (message.ref.chat_id, message.grouped_id)
         await self._albums.add(key, message)
         return ForwardingReport(buffered=True)
 
