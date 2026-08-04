@@ -8,7 +8,7 @@ dependencies = [
     "aiosqlite>=0.21,<1",
     "pydantic>=2.11,<3",
     "pydantic-settings>=2.10,<3",
-    "telethon @ https://codeberg.org/Lonami/Telethon/archive/570b7e5b03459cb5bd1c81bc1282f3cc4b8ed009.tar.gz#subdirectory=client&sha256=efc54cd85c482b3d6159b8880cd4ca77685b9e5551185dd103d1cac5b060aa7e",
+    "telethon>=1.44,<1.45",
 ]
 
 [project.scripts]

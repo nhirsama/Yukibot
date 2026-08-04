@@ -12,7 +12,14 @@ from yukibot.contracts import (
     TelegramMessageReceived,
     TelegramMessagesDeleted,
 )
-from yukibot.kernel import EventBus, Subscription, TaskSupervisor
+from yukibot.kernel import (
+    CommandHandler,
+    CommandRegistry,
+    CommandSubscription,
+    EventBus,
+    Subscription,
+    TaskSupervisor,
+)
 
 from .jobs import ForwardJobEvent, pending_jobs_for_event
 from .worker import ForwardJobRunner
@@ -27,6 +34,8 @@ class ForwarderFeature:
         runner: ForwardJobRunner,
         supervisor: TaskSupervisor,
         *,
+        command_registry: CommandRegistry | None = None,
+        command_handler: CommandHandler | None = None,
         album_delay: float = 0.8,
         stop_timeout: float = 15.0,
         clock: Callable[[], float] = time.time,
@@ -36,9 +45,14 @@ class ForwarderFeature:
             raise ValueError("album_delay must not be negative")
         if stop_timeout <= 0:
             raise ValueError("stop_timeout must be positive")
+        if (command_registry is None) != (command_handler is None):
+            raise ValueError("command registry and handler must be provided together")
         self._bus = bus
         self._runner = runner
         self._supervisor = supervisor
+        self._command_registry = command_registry
+        self._command_handler = command_handler
+        self._command_subscription: CommandSubscription | None = None
         self._album_delay = album_delay
         self._stop_timeout = stop_timeout
         self._clock = clock
@@ -63,7 +77,19 @@ class ForwarderFeature:
             self._subscriptions.append(
                 self._bus.subscribe(TelegramMessagesDeleted, self._on_delete)
             )
+            if self._command_registry is not None and self._command_handler is not None:
+                from .commands import ROUTE_HELP
+
+                self._command_subscription = self._command_registry.register(
+                    "/route",
+                    summary="管理消息转发路由",
+                    help_text=ROUTE_HELP,
+                    handler=self._command_handler,
+                )
         except BaseException:
+            if self._command_subscription is not None:
+                self._command_subscription.unregister()
+                self._command_subscription = None
             for subscription in self._subscriptions:
                 subscription.unsubscribe()
             self._subscriptions.clear()
@@ -80,6 +106,9 @@ class ForwarderFeature:
             )
 
     async def stop(self) -> None:
+        if self._command_subscription is not None:
+            self._command_subscription.unregister()
+            self._command_subscription = None
         for subscription in self._subscriptions:
             subscription.unsubscribe()
         self._subscriptions.clear()

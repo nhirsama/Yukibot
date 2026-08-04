@@ -1,6 +1,19 @@
 """Telegram-independent application kernel."""
 
 from .application import Application
+from .control import (
+    CommandAuthorizer,
+    CommandDispatch,
+    CommandDispatcher,
+    CommandHandler,
+    CommandReceiptStore,
+    CommandRegistration,
+    CommandRegistry,
+    CommandResult,
+    CommandSubscription,
+    ControlCommand,
+    split_command,
+)
 from .errors import (
     DuplicateFeatureError,
     KernelError,
@@ -17,11 +30,27 @@ from .event_bus import (
 )
 from .feature import Feature
 from .lifecycle import LifecycleManager, LifecycleState
+from .modules import (
+    ModuleController,
+    ModuleNotFoundError,
+    ModuleStateStore,
+    ModuleStatus,
+)
 from .shutdown import ShutdownCoordinator
 from .supervisor import SupervisorLifecycle, TaskFailure, TaskSupervisor
 
 __all__ = [
     "Application",
+    "CommandAuthorizer",
+    "CommandDispatch",
+    "CommandDispatcher",
+    "CommandHandler",
+    "CommandReceiptStore",
+    "CommandRegistration",
+    "CommandRegistry",
+    "CommandResult",
+    "CommandSubscription",
+    "ControlCommand",
     "DispatchFailure",
     "DispatchReport",
     "DuplicateFeatureError",
@@ -33,10 +62,15 @@ __all__ = [
     "LifecycleStartError",
     "LifecycleState",
     "LifecycleStopError",
+    "ModuleController",
+    "ModuleNotFoundError",
+    "ModuleStateStore",
+    "ModuleStatus",
     "ShutdownCoordinator",
     "Subscription",
     "SupervisorClosedError",
     "SupervisorLifecycle",
     "TaskFailure",
     "TaskSupervisor",
+    "split_command",
 ]

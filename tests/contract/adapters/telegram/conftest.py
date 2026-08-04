@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from io import BytesIO
@@ -53,6 +54,14 @@ class FakeMessage:
     can_forward: bool = True
     _raw: object = field(default_factory=FakeRaw)
 
+    @property
+    def chat_id(self) -> int:
+        return self.chat.value
+
+    @property
+    def sender_id(self) -> int | None:
+        return self.sender.value if self.sender is not None else None
+
 
 @dataclass
 class FakeDialog:
@@ -79,11 +88,16 @@ class FakeAlbum:
 class FakeNativeClient:
     def __init__(self) -> None:
         self.handlers: dict[type[object], object] = {}
+        self.update_pump_calls = 0
+        self.update_pump_started = asyncio.Event()
+        self.update_pump_stopped = asyncio.Event()
+        self._disconnect_requested = asyncio.Event()
         self.connected = False
         self.disconnected = False
         self.authorized = True
         self.logged_in = False
         self.dialogs: list[FakeDialog] = []
+        self.me = FakePeer(999, "owner")
         self.messages: dict[tuple[int, int], FakeMessage] = {}
         self.calls: list[tuple[object, ...]] = []
         self.next_id = 100
@@ -104,6 +118,15 @@ class FakeNativeClient:
     async def disconnect(self) -> None:
         self.disconnected = True
         self.connected = False
+        self._disconnect_requested.set()
+
+    async def run_until_disconnected(self) -> None:
+        self.update_pump_calls += 1
+        self.update_pump_started.set()
+        try:
+            await self._disconnect_requested.wait()
+        finally:
+            self.update_pump_stopped.set()
 
     async def is_authorized(self) -> bool:
         return self.authorized
@@ -112,6 +135,9 @@ class FakeNativeClient:
         self.logged_in = True
         self.authorized = True
         return object()
+
+    async def get_me(self) -> FakePeer:
+        return self.me
 
     async def get_dialogs(self):  # type: ignore[no-untyped-def]
         return tuple(self.dialogs)

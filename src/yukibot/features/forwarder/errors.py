@@ -33,6 +33,10 @@ class RouteCycleError(ForwarderError, ValueError):
     """Enabled routes contain a forwarding cycle."""
 
 
+class RouteNotFoundError(ForwarderError, KeyError):
+    """The requested forwarding route does not exist."""
+
+
 class RetryAfter(ForwarderError):
     """The operation may be retried after the requested delay."""
 

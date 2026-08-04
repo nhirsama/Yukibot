@@ -68,7 +68,7 @@ def test_external_sdks_only_exist_in_adapters() -> None:
 
 
 def test_forwarder_core_does_not_depend_on_framework() -> None:
-    integration_files = {"feature.py", "migrations.py", "repository.py"}
+    integration_files = {"commands.py", "feature.py", "migrations.py", "repository.py"}
     violations: list[str] = []
     root = SOURCE_ROOT / "features" / "forwarder"
     for source in root.glob("*.py"):

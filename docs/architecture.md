@@ -435,16 +435,53 @@ YUKIBOT_FORWARDER_ALBUM_DELAY
 
 ## 12. 管理命令
 
-管理命令属于对应功能，例如 `/forward add` 放在 forwarder 中，不建立一个包含全部业务的中央 command 模块。
+管理命令是普通消息数据面之外的带外控制信令。Telegram update 规范化后必须先经过控制面；已被
+识别和消费的命令不得再发布为 `TelegramMessageReceived`，避免被转发、归档或触发其他普通功能。
+当前登录账号发出的已注册命令在任何聊天中都可以进入控制面，不额外判断聊天是否为收藏夹；命令
+响应作为对原消息的回复发送到同一聊天。额外管理员通过稳定的 Telegram user ID 记录在 SQLite，
+只有数据库中的委派管理员可以从收到的消息调用控制面。当前登录账号由已授权 session 的 `get_me()`
+确定，不依赖环境变量或联系人备注。
 
-Telegram adapter 可以提供一个小型 `CommandRouter`，统一完成：
+```text
+Telegram update
+    -> normalize
+    -> CommandRouter
+         |-- registered command -> module command handler
+         `-- ordinary message   -> EventBus
+```
 
-- 命令解析；
-- 管理员白名单；
-- 命令名称冲突检查；
-- 错误到用户消息的转换。
+功能只注册第一个命令参数及其 handler，例如 Forwarder 注册 `/route`，另一个功能可以注册
+`/other`。框架仅从消息开头提取这个已注册的一级命令，将其后的内容保持原样交给对应功能；
+子命令、参数语法和业务校验完全由功能负责。框架不对命令名称做大小写归一化或额外字符集限制，
+注册和匹配使用功能提供的原始名称。
 
-功能只注册命令及 handler。命令 handler 调用本功能 service，不能绕过 service 直接写数据库。
+框架唯一直接实现的业务可见命令是 `/help`，用于列出当前已注册命令或显示某个一级命令的帮助。
+`/admin` 属于独立的常驻 Management 功能，负责委派管理员和可管理模块的期望启用状态；它本身不
+纳入运行时模块开关，避免关闭后失去管理入口。Forwarder 自行拥有 `/route` 及其参数解析和管理
+service，停用 Forwarder 时同时注销 `/route`，重新启用时恢复注册。
+
+控制面必须遵守以下约束：
+
+1. 只把消息开头的 `/command` 识别为控制命令。
+2. 框架只拆分第一个 token，剩余参数原样传给模块。
+3. 已注册的一级命令一旦匹配就始终被消费；即使参数错误，也不能回落到普通 `EventBus`。
+4. 未注册的 `/command` 按普通消息处理，不能被控制面截获。
+5. 同一个一级命令只能注册一次，冲突必须在模块启动或注册阶段立即失败。
+6. 框架统一完成调用者身份验证和全局管理员检查，模块继续负责自己的业务权限校验。
+7. 框架统一捕获 handler 异常，并将其转换为控制面响应和结构化日志。
+8. 只执行首次收到的新命令消息；编辑已有命令消息不能再次触发执行。
+9. 使用 `(chat_id, message_id)` 标识和去重命令，防止 Telethon catch-up 或 update 重放造成重复执行。
+
+委派管理员列表、模块期望状态和命令回执均持久化到 SQLite。只有当前登录账号发出的 outgoing
+命令可以添加或删除委派管理员；当前账号和委派管理员都可以查看状态、管理模块及调用功能命令。
+模块开关使用明确的 `enable` / `disable` 期望状态，进程重启后继续生效。
+
+命令处理必须无状态，或者对同一个命令重复执行保持幂等。禁止依赖未持久化的多轮命令会话状态；
+会改变配置的命令应使用明确目标和期望状态，例如 `enable`、`disable`、按稳定 ID 更新或删除。
+控制面的消息去重是额外保护，不能代替模块自身的幂等设计。
+
+命令 handler 只能调用本功能的管理 service，不能绕过 service 直接写数据库。未来增加 CLI、HTTP
+或 AstrBot 管理入口时，它们应复用同一个管理 service，而不是复用或模拟 Telegram 命令文本。
 
 ## 13. 可观测性
 
@@ -534,13 +571,13 @@ uv run ruff format --check .
 uv run mypy src
 ```
 
-若直接使用 Codeberg 的 Telethon v2 分支，应固定到经过验证的 tag 或 commit，而不是长期跟随分支头：
+Telethon 使用 PyPI 发布的稳定版，并限制在已经验证的次版本范围内：
 
 ```bash
-uv add "telethon @ git+https://codeberg.org/Lonami/Telethon.git@<verified-tag-or-commit>"
+uv add "telethon>=1.44,<1.45"
 ```
 
-`pyproject.toml` 声明兼容范围，`uv.lock` 提交到仓库，以获得可重复部署。代码和文档必须针对同一个 Telethon 主版本，不能混用 v1 的 `TelegramClient` 示例与 v2 的 `Client` API。
+`pyproject.toml` 声明兼容范围，`uv.lock` 提交到仓库，以获得可重复部署。代码和文档必须针对同一个 Telethon 主版本。
 
 ## 16. 新增功能流程
 

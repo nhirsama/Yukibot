@@ -1,4 +1,4 @@
-"""Translate Telethon v2 updates into stable application events."""
+"""Translate Telethon updates into stable application events."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from yukibot.contracts import (
     TelegramServiceKind,
     TelegramServiceMessage,
 )
-from yukibot.kernel import EventBus
+from yukibot.kernel import EventBus, TaskSupervisor
 
 from .client import (
     NativeClient,
@@ -27,9 +27,9 @@ from .client import (
     NativeHandler,
     NativeMessage,
     PeerRegistry,
-    peer_dialog_id,
     telethon_event_types,
 )
+from .commands import IncomingCommandRouter
 
 
 class TelethonEventSource:
@@ -41,6 +41,8 @@ class TelethonEventSource:
         bus: EventBus,
         peers: PeerRegistry,
         *,
+        supervisor: TaskSupervisor,
+        commands: IncomingCommandRouter | None = None,
         now: Callable[[], datetime] | None = None,
         drain_timeout: float = 15.0,
         logger: logging.Logger | None = None,
@@ -50,6 +52,8 @@ class TelethonEventSource:
         self._client = client
         self._bus = bus
         self._peers = peers
+        self._supervisor = supervisor
+        self._commands = commands
         self._now = now or (lambda: datetime.now(UTC))
         self._drain_timeout = drain_timeout
         self._logger = logger or logging.getLogger(__name__)
@@ -57,6 +61,7 @@ class TelethonEventSource:
         self._started = False
         self._accepting = False
         self._inflight: set[asyncio.Task[object]] = set()
+        self._update_pump: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self._started:
@@ -72,6 +77,13 @@ class TelethonEventSource:
         try:
             for handler, event_type in zip(handlers, event_types, strict=True):
                 self._client.add_event_handler(handler, event_type)
+            # Stable Telethon owns its receive loop; this task monitors the
+            # connection and turns an unexpected disconnect into a critical failure.
+            self._update_pump = self._supervisor.create_task(
+                self._run_update_pump(),
+                name="telegram:update-pump",
+                critical=True,
+            )
         except BaseException:
             self._accepting = False
             self._remove_handlers()
@@ -79,11 +91,15 @@ class TelethonEventSource:
         self._started = True
 
     async def stop(self) -> None:
-        if not self._started and self._event_types is None:
+        if not self._started and self._event_types is None and self._update_pump is None:
             return
         self._accepting = False
         self._remove_handlers()
         self._started = False
+        pump, self._update_pump = self._update_pump, None
+        if pump is not None:
+            pump.cancel()
+            await asyncio.gather(pump, return_exceptions=True)
         inflight = tuple(self._inflight)
         if not inflight:
             return
@@ -101,47 +117,78 @@ class TelethonEventSource:
     async def _handle_new(self, raw_event: object) -> object:
         if not self._accepting:
             return None
-        event = cast(NativeMessage, raw_event)
-        self._remember_message_peers(event)
-        await self._publish(TelegramMessageReceived(normalize_message(event, self._now())))
+        task = self._track_current_task()
+        try:
+            event = cast(NativeMessage, raw_event)
+            self._remember_message_peers(event)
+            message = normalize_message(event, self._now())
+            self._logger.info(
+                "telegram message received",
+                extra={
+                    "chat_id": message.ref.chat_id,
+                    "message_id": message.ref.message_id,
+                    "sender_id": message.sender_id,
+                    "outgoing": message.outgoing,
+                    "content_type": message.content_type.value,
+                },
+            )
+            if self._commands is not None and await self._commands.route(message):
+                return None
+            await self._bus.publish(TelegramMessageReceived(message))
+        finally:
+            self._release_task(task)
         return None
+
+    async def _run_update_pump(self) -> None:
+        await self._client.run_until_disconnected()
+        if self._accepting:
+            raise RuntimeError("Telegram update pump stopped while the event source was active")
 
     async def _handle_edit(self, raw_event: object) -> object:
         if not self._accepting:
             return None
-        event = cast(NativeMessage, raw_event)
-        self._remember_message_peers(event)
-        observed_at = self._now()
-        message = normalize_message(event, observed_at)
-        if message.edited_at is None:
-            message = replace(message, edited_at=observed_at)
-        await self._publish(TelegramMessageEdited(message))
+        task = self._track_current_task()
+        try:
+            event = cast(NativeMessage, raw_event)
+            self._remember_message_peers(event)
+            observed_at = self._now()
+            message = normalize_message(event, observed_at)
+            if message.edited_at is None:
+                message = replace(message, edited_at=observed_at)
+            if self._commands is not None and await self._commands.route(message, execute=False):
+                return None
+            await self._bus.publish(TelegramMessageEdited(message))
+        finally:
+            self._release_task(task)
         return None
 
     async def _handle_delete(self, raw_event: object) -> object:
         if not self._accepting:
             return None
-        event = cast(NativeDeletedEvent, raw_event)
-        chat_id = _channel_dialog_id(event.channel_id) if event.channel_id is not None else None
-        await self._publish(
-            TelegramMessagesDeleted(tuple(event.message_ids), self._now(), chat_id=chat_id)
-        )
+        task = self._track_current_task()
+        try:
+            event = cast(NativeDeletedEvent, raw_event)
+            chat_id = event.chat_id
+            if chat_id is None and event.channel_id is not None:
+                chat_id = _channel_dialog_id(event.channel_id)
+            await self._bus.publish(
+                TelegramMessagesDeleted(tuple(event.message_ids), self._now(), chat_id=chat_id)
+            )
+        finally:
+            self._release_task(task)
         return None
 
-    async def _publish(
-        self,
-        event: TelegramMessageReceived | TelegramMessageEdited | TelegramMessagesDeleted,
-    ) -> None:
+    def _track_current_task(self) -> asyncio.Task[object] | None:
         task = asyncio.current_task()
         if task is None:
-            await self._bus.publish(event)
-            return
+            return None
         tracked = cast(asyncio.Task[object], task)
         self._inflight.add(tracked)
-        try:
-            await self._bus.publish(event)
-        finally:
-            self._inflight.discard(tracked)
+        return tracked
+
+    def _release_task(self, task: asyncio.Task[object] | None) -> None:
+        if task is not None:
+            self._inflight.discard(task)
 
     def _remember_message_peers(self, event: NativeMessage) -> None:
         self._peers.remember(event.chat)
@@ -167,10 +214,10 @@ def normalize_message(message: NativeMessage, fallback_date: datetime) -> Telegr
         occurred_at = occurred_at.replace(tzinfo=UTC)
     edited_at = _normalized_date(getattr(raw, "edit_date", None))
     return TelegramMessage(
-        ref=MessageRef(peer_dialog_id(message.chat), message.id),
+        ref=MessageRef(message.chat_id, message.id),
         content_type=content_type,
         occurred_at=occurred_at,
-        sender_id=peer_dialog_id(message.sender) if message.sender is not None else None,
+        sender_id=message.sender_id,
         topic_id=_topic_id(raw, message.id),
         grouped_id=message.grouped_id,
         text=None if is_caption else raw_text,
@@ -184,7 +231,7 @@ def normalize_message(message: NativeMessage, fallback_date: datetime) -> Telegr
 
 def _content_type(message: NativeMessage) -> TelegramContentType:
     raw_name = type(message._raw).__name__
-    if raw_name == "MessageService":
+    if raw_name == "MessageService" or getattr(message._raw, "action", None) is not None:
         return TelegramContentType.SERVICE
     media = getattr(message._raw, "media", None)
     media_name = type(media).__name__

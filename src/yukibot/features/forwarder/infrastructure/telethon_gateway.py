@@ -1,4 +1,4 @@
-"""Telethon v2 implementation of the forwarder's Telegram port."""
+"""Telethon implementation of the forwarder's Telegram port."""
 
 from __future__ import annotations
 
@@ -152,7 +152,7 @@ class TelethonGateway:
         reply_to_message_id: int | None,
     ) -> Sequence[NativeMessage]:
         if destination.topic_id is not None or reply_to_message_id is not None:
-            raise NativeForwardUnsupported("Telethon v2 native forward has no topic/reply option")
+            raise NativeForwardUnsupported("Telethon native forward has no topic/reply option")
         if any(not message.can_forward for message in messages):
             raise NativeForwardUnsupported("source content has forwarding protection")
         source = messages[0].chat
@@ -252,17 +252,27 @@ def _translate_error(error: Exception, *, native_forward: bool = False) -> Excep
         return error
     name = cast(str | None, getattr(error, "name", None))
     value = cast(int | None, getattr(error, "value", None))
+    if name is None and error.__class__.__module__.startswith("telethon.errors"):
+        name = error.__class__.__name__
+        value = cast(int | None, getattr(error, "seconds", None))
     if name is not None:
-        if name.startswith("FLOOD_WAIT") or name.startswith("SLOWMODE_WAIT"):
+        if (
+            name.startswith("FLOOD_WAIT")
+            or name.startswith("SLOWMODE_WAIT")
+            or name in {"FloodWaitError", "SlowModeWaitError"}
+        ):
             return RetryAfter(float(value or 1))
-        if name in {"MESSAGE_NOT_MODIFIED"}:
+        if name in {"MESSAGE_NOT_MODIFIED", "MessageNotModifiedError"}:
             return MessageNotModified(str(error))
-        if name in {"MESSAGE_ID_INVALID", "MSG_ID_INVALID"}:
+        if name in {"MESSAGE_ID_INVALID", "MSG_ID_INVALID", "MessageIdInvalidError"}:
             return MessageNotFound(str(error))
         if native_forward and name in {
             "CHAT_FORWARDS_RESTRICTED",
             "CHAT_SEND_MEDIA_FORBIDDEN",
             "USER_BANNED_IN_CHANNEL",
+            "ChatForwardsRestrictedError",
+            "ChatSendMediaForbiddenError",
+            "UserBannedInChannelError",
         }:
             return NativeForwardUnsupported(str(error))
         return PermanentDeliveryError(f"Telegram RPC {name}: {error}")

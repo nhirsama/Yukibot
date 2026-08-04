@@ -1,8 +1,12 @@
-"""Narrow native-client protocol and the only Telethon client factory."""
+"""Narrow native-client protocol and the stable Telethon v1 adapter."""
 
 from __future__ import annotations
 
+import shutil
+import sqlite3
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib import import_module
 from io import BytesIO
 from pathlib import Path
@@ -23,6 +27,8 @@ class NativePeer(Protocol):
 
 class NativeMessage(Protocol):
     id: int
+    chat_id: int
+    sender_id: int | None
     grouped_id: int | None
     text: str | None
     text_html: str | None
@@ -42,6 +48,7 @@ class NativeMessage(Protocol):
 class NativeDeletedEvent(Protocol):
     message_ids: Sequence[int]
     channel_id: int | None
+    chat_id: int | None
 
 
 class NativeDialog(Protocol):
@@ -70,9 +77,13 @@ class NativeClient(Protocol):
 
     async def disconnect(self) -> None: ...
 
+    async def run_until_disconnected(self) -> None: ...
+
     async def is_authorized(self) -> bool: ...
 
     async def interactive_login(self) -> object: ...
+
+    async def get_me(self) -> NativePeer: ...
 
     def get_dialogs(self) -> Awaitable[Sequence[NativeDialog]]: ...
 
@@ -146,14 +157,42 @@ class PeerRegistry:
         self._peers.clear()
 
 
+class AccountIdentity:
+    """Authenticated Telegram account identity shared with the control plane."""
+
+    def __init__(self) -> None:
+        self._user_id: int | None = None
+
+    @property
+    def user_id(self) -> int:
+        if self._user_id is None:
+            raise RuntimeError("Telegram account identity is not available")
+        return self._user_id
+
+    def set(self, peer: NativePeer) -> None:
+        user_id = peer_dialog_id(peer)
+        if user_id <= 0:
+            raise ValueError("authenticated Telegram account must have a positive user ID")
+        self._user_id = user_id
+
+    def clear(self) -> None:
+        self._user_id = None
+
+
 class TelethonClientLifecycle:
     """Connect and authorize before features start, then disconnect after they drain."""
 
     name = "telegram-client"
 
-    def __init__(self, client: NativeClient, peers: PeerRegistry) -> None:
+    def __init__(
+        self,
+        client: NativeClient,
+        peers: PeerRegistry,
+        identity: AccountIdentity | None = None,
+    ) -> None:
         self._client = client
         self._peers = peers
+        self._identity = identity or AccountIdentity()
         self._started = False
 
     async def start(self) -> None:
@@ -163,12 +202,16 @@ class TelethonClientLifecycle:
             await self._client.connect()
             if not await self._client.is_authorized():
                 await self._client.interactive_login()
+            me = await self._client.get_me()
+            self._identity.set(me)
+            self._peers.remember(me)
             dialogs = await self._client.get_dialogs()
             for dialog in dialogs:
                 self._peers.remember(dialog.chat)
         except BaseException:
             await self._client.disconnect()
             self._peers.clear()
+            self._identity.clear()
             raise
         self._started = True
 
@@ -178,6 +221,7 @@ class TelethonClientLifecycle:
         finally:
             self._started = False
             self._peers.clear()
+            self._identity.clear()
 
 
 def create_telethon_client(
@@ -185,20 +229,22 @@ def create_telethon_client(
     api_id: int,
     api_hash: str,
 ) -> NativeClient:
-    """Create the pinned Telethon v2 client without leaking its type elsewhere."""
+    """Create the stable Telethon client without leaking its API elsewhere."""
 
     session_path.expanduser().parent.mkdir(parents=True, exist_ok=True)
+    _migrate_v2_session(session_path.expanduser())
     telethon = import_module("telethon")
-    client_type = cast(Any, telethon).Client
+    client_type = cast(Any, telethon).TelegramClient
     client = client_type(
         session_path,
         api_id,
         api_hash,
         catch_up=True,
-        check_all_handlers=True,
+        device_model="Yukibot",
         flood_sleep_threshold=0,
+        sequential_updates=True,
     )
-    return cast(NativeClient, client)
+    return TelethonClientAdapter(client)
 
 
 def telethon_event_types() -> tuple[type[object], type[object], type[object]]:
@@ -207,15 +253,312 @@ def telethon_event_types() -> tuple[type[object], type[object], type[object]]:
 
 
 def peer_dialog_id(peer: NativePeer) -> int:
-    """Normalize both pre- and post-Rust Telethon v2 peers to Bot API dialog IDs."""
+    """Normalize Telethon peers to Bot API dialog IDs."""
 
-    value = int(peer.id)
+    native = cast(Any, peer)
+    if hasattr(native, "channel_id"):
+        return -(1_000_000_000_000 + int(native.channel_id))
+    if hasattr(native, "chat_id"):
+        return -int(native.chat_id)
+    if hasattr(native, "user_id"):
+        return int(native.user_id)
+    value = int(native.id)
     if value <= 0:
         return value
     peer_name = type(peer).__name__
     reference_name = type(getattr(peer, "ref", None)).__name__
     if peer_name == "Channel" or reference_name == "ChannelRef":
         return -(1_000_000_000_000 + value)
-    if peer_name == "Group" or reference_name == "GroupRef":
+    if peer_name in ("Chat", "Group") or reference_name == "GroupRef":
         return -value
     return value
+
+
+class TelethonClientAdapter:
+    """Map the stable Telethon v1 API onto the project's native client port."""
+
+    def __init__(self, client: object) -> None:
+        self._client = cast(Any, client)
+        self._handlers: dict[NativeHandler, list[NativeHandler]] = {}
+
+    @property
+    def native_client(self) -> object:
+        return self._client
+
+    def add_event_handler(self, handler: NativeHandler, event_cls: type[object]) -> None:
+        async def adapted(raw_event: object) -> object:
+            event = (
+                _StableDeletedEvent(raw_event)
+                if type(raw_event).__name__ == "Event" and hasattr(raw_event, "deleted_ids")
+                else _StableMessage(raw_event)
+            )
+            return await handler(event)
+
+        self._handlers.setdefault(handler, []).append(adapted)
+        self._client.add_event_handler(adapted, event_cls)
+
+    def remove_event_handler(self, handler: NativeHandler) -> None:
+        for adapted in self._handlers.pop(handler, ()):
+            self._client.remove_event_handler(adapted)
+
+    async def connect(self) -> None:
+        await self._client.connect()
+
+    async def disconnect(self) -> None:
+        await self._client.disconnect()
+
+    async def run_until_disconnected(self) -> None:
+        await self._client.run_until_disconnected()
+
+    async def is_authorized(self) -> bool:
+        return cast(bool, await self._client.is_user_authorized())
+
+    async def interactive_login(self) -> object:
+        return cast(object, await self._client.start())
+
+    async def get_me(self) -> NativePeer:
+        peer = await self._client.get_me()
+        if peer is None:
+            raise RuntimeError("Telethon did not return the authenticated account")
+        return cast(NativePeer, peer)
+
+    async def get_dialogs(self) -> Sequence[NativeDialog]:
+        dialogs = await self._client.get_dialogs()
+        return tuple(_StableDialog(dialog.entity) for dialog in dialogs)
+
+    async def get_messages_with_ids(
+        self, chat: object, message_ids: list[int]
+    ) -> Sequence[NativeMessage]:
+        messages = await self._client.get_messages(chat, ids=message_ids)
+        return tuple(
+            _StableMessage(message, chat=chat) for message in messages if message is not None
+        )
+
+    async def forward_messages(
+        self, target: object, message_ids: list[int], source: object
+    ) -> Sequence[NativeMessage]:
+        messages = await self._client.forward_messages(target, message_ids, from_peer=source)
+        return tuple(_StableMessage(message, chat=target) for message in messages)
+
+    async def send_message(
+        self,
+        chat: object,
+        text: str | None = None,
+        *,
+        html: str | None = None,
+        reply_to: int | None = None,
+    ) -> NativeMessage:
+        message = await self._client.send_message(
+            chat,
+            html if html is not None else text,
+            parse_mode="html" if html is not None else None,
+            reply_to=reply_to,
+        )
+        return _StableMessage(message, chat=chat)
+
+    async def send_photo(
+        self,
+        chat: object,
+        file: object,
+        *,
+        caption_html: str | None = None,
+        reply_to: int | None = None,
+    ) -> NativeMessage:
+        message = await self._client.send_file(
+            chat,
+            _uploadable_file(file),
+            caption=caption_html,
+            parse_mode="html",
+            force_document=False,
+            reply_to=reply_to,
+        )
+        return _StableMessage(message, chat=chat)
+
+    async def send_file(
+        self,
+        chat: object,
+        file: object,
+        *,
+        caption_html: str | None = None,
+        reply_to: int | None = None,
+    ) -> NativeMessage:
+        message = await self._client.send_file(
+            chat,
+            _uploadable_file(file),
+            caption=caption_html,
+            parse_mode="html",
+            reply_to=reply_to,
+        )
+        return _StableMessage(message, chat=chat)
+
+    async def edit_message(
+        self,
+        chat: object,
+        message_id: int,
+        *,
+        text: str | None = None,
+        html: str | None = None,
+    ) -> NativeMessage:
+        message = await self._client.edit_message(
+            chat,
+            message_id,
+            html if html is not None else text,
+            parse_mode="html" if html is not None else None,
+        )
+        return _StableMessage(message, chat=chat)
+
+    async def delete_messages(
+        self, chat: object, message_ids: list[int], *, revoke: bool = True
+    ) -> int:
+        result = await self._client.delete_messages(chat, message_ids, revoke=revoke)
+        return int(getattr(result, "pts_count", 0))
+
+    async def download(self, media: object, file: BytesIO) -> None:
+        source = media.message if isinstance(media, _StableFile) else media
+        await self._client.download_media(source, file=file)
+
+    def prepare_album(self) -> NativeAlbum:
+        return _StableAlbum(self)
+
+
+@dataclass(slots=True)
+class _StableDialog:
+    chat: NativePeer
+
+
+class _StableFile:
+    def __init__(self, message: object) -> None:
+        self.message = message
+        raw = cast(Any, message)
+        self.payload = raw.photo or raw.document
+        self._attributes = tuple(getattr(raw.document, "attributes", ()) or ())
+
+
+class _StableMessage:
+    def __init__(self, message: object, *, chat: object | None = None) -> None:
+        raw = cast(Any, message)
+        nested = getattr(raw, "message", None)
+        if hasattr(nested, "id"):
+            raw = nested
+        self._raw = raw
+        self.id = int(raw.id)
+        self.chat_id = int(raw.chat_id)
+        self.sender_id = cast(int | None, raw.sender_id)
+        self.grouped_id = cast(int | None, raw.grouped_id)
+        self.text = cast(str | None, raw.raw_text)
+        self.text_html = _message_html(raw)
+        self.date = raw.date
+        self.chat = cast(NativePeer, chat or raw.chat or raw.input_chat)
+        self.sender = cast(NativePeer | None, raw.sender or raw.input_sender)
+        self.photo = raw.photo
+        self.audio = raw.audio
+        self.video = raw.video
+        self.file: object | None = _StableFile(raw) if raw.file is not None else None
+        self.replied_message_id = cast(int | None, raw.reply_to_msg_id)
+        self.outgoing = bool(raw.out)
+        self.can_forward = not bool(raw.noforwards)
+
+
+class _StableDeletedEvent:
+    def __init__(self, event: object) -> None:
+        raw = cast(Any, event)
+        self.message_ids = tuple(int(message_id) for message_id in raw.deleted_ids)
+        self.chat_id = cast(int | None, raw.chat_id)
+        self.channel_id = None
+
+
+class _StableAlbum:
+    def __init__(self, client: TelethonClientAdapter) -> None:
+        self._client = client
+        self._files: list[BytesIO] = []
+        self._captions: list[str] = []
+
+    async def add_photo(self, file: BytesIO, *, caption_html: str | None = None) -> None:
+        file.name = "photo.jpg"
+        self._append(file, caption_html)
+
+    async def add_video(self, file: BytesIO, *, caption_html: str | None = None) -> None:
+        file.name = "video.mp4"
+        self._append(file, caption_html)
+
+    async def send(self, peer: object, *, reply_to: int | None = None) -> Sequence[NativeMessage]:
+        messages = await self._client._client.send_file(
+            peer,
+            self._files,
+            caption=self._captions,
+            parse_mode="html",
+            reply_to=reply_to,
+        )
+        items = messages if isinstance(messages, Sequence) else (messages,)
+        return tuple(_StableMessage(message, chat=peer) for message in items)
+
+    def _append(self, file: BytesIO, caption_html: str | None) -> None:
+        self._files.append(file)
+        self._captions.append(caption_html or "")
+
+
+def _message_html(message: Any) -> str | None:
+    text = cast(str | None, message.raw_text)
+    if text is None:
+        return None
+    html = import_module("telethon.extensions.html")
+    return cast(str, html.unparse(text, message.entities or ()))
+
+
+def _uploadable_file(file: object) -> object:
+    return file.payload if isinstance(file, _StableFile) else file
+
+
+def _migrate_v2_session(path: Path) -> None:
+    """Convert the pinned v2-alpha SQLite session once, retaining a backup."""
+
+    if not path.exists():
+        return
+    with sqlite3.connect(path) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        if "sessions" in tables or not {"datacenter", "user"}.issubset(tables):
+            return
+        user = connection.execute("SELECT dc FROM user LIMIT 1").fetchone()
+        if user is None:
+            return
+        dc = connection.execute(
+            "SELECT ipv4_addr, auth FROM datacenter WHERE id = ?", (int(user[0]),)
+        ).fetchone()
+        state = connection.execute("SELECT pts, qts, date, seq FROM state LIMIT 1").fetchone()
+    if dc is None or not isinstance(dc[1], bytes) or len(dc[1]) != 256:
+        raise RuntimeError("the Telethon v2 session has no reusable authorization key")
+
+    address, separator, raw_port = str(dc[0]).rpartition(":")
+    if not separator or not address:
+        raise RuntimeError("the Telethon v2 session contains an invalid data-center address")
+    temporary = path.with_name(f"{path.stem}.migrating.session")
+    temporary.unlink(missing_ok=True)
+    sessions = import_module("telethon.sessions")
+    crypto = import_module("telethon.crypto")
+    types = import_module("telethon.tl.types")
+    session = cast(Any, sessions).SQLiteSession(str(temporary))
+    try:
+        session.set_dc(int(user[0]), address, int(raw_port))
+        session.auth_key = cast(Any, crypto).AuthKey(dc[1])
+        if state is not None:
+            session.set_update_state(
+                0,
+                cast(Any, types).updates.State(
+                    pts=int(state[0]),
+                    qts=int(state[1]),
+                    date=datetime.fromtimestamp(int(state[2]), tz=UTC),
+                    seq=int(state[3]),
+                    unread_count=0,
+                ),
+            )
+        session.save()
+    finally:
+        session.close()
+
+    backup = path.with_name(f"{path.name}.v2.bak")
+    if not backup.exists():
+        shutil.copy2(path, backup)
+    temporary.replace(path)

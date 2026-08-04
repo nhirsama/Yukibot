@@ -91,6 +91,7 @@ class ForwardJobRunner:
         self._stopping = False
 
     async def prepare(self) -> int:
+        self._stopping = False
         return await self._repository.recover_incomplete()
 
     async def enqueue(self, jobs: Sequence[PendingForwardJob]) -> int:

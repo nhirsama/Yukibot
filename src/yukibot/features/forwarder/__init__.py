@@ -11,6 +11,7 @@ from .errors import (
     PermanentDeliveryError,
     RetryAfter,
     RouteCycleError,
+    RouteNotFoundError,
 )
 from .forwarder import Forwarder
 from .memory import InMemoryMessageLinkRepository, InMemoryRouteRepository
@@ -72,6 +73,7 @@ __all__ = [
     "RetryAfter",
     "Route",
     "RouteCycleError",
+    "RouteNotFoundError",
     "RouteRepository",
     "ServiceKind",
     "ServiceMessage",
