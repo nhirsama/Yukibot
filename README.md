@@ -55,8 +55,8 @@ Forwarder 提供：
 ```text
 /route list
 /route show <id>
-/route add <id> <source_chat> <destination_chat> [copy|forward] [source_topic|-] [destination_topic|-]
-/route set <id> <source_chat> <destination_chat> [copy|forward] [source_topic|-] [destination_topic|-]
+/route add <id> <source_chat> <destination_chat> [forward|copy] [source_topic|-] [destination_topic|-]
+/route set <id> <source_chat> <destination_chat> [forward|copy] [source_topic|-] [destination_topic|-]
 /route enable <id>
 /route disable <id>
 /route remove <id>
@@ -65,8 +65,22 @@ Forwarder 提供：
 例如：
 
 ```text
-/route add 1 -1001234567890 -1009876543210 copy - -
+/route add 1 -1001234567890 -1009876543210
 ```
+
+路由默认使用 Telegram 原生转发；来源禁止转发或当前操作无法原生转发时自动回退为复制。目标是
+论坛超级群且没有指定 `destination_topic` 时，Yukibot 会创建一个与源频道同名的话题并保存映射；
+源频道改名后，话题名会同步更新。多条相同“源频道 -> 目标论坛群”路由复用同一个自动话题。
+账号需要在目标群拥有创建和管理话题的权限。
+
+要使用已有话题，可以显式传入话题 ID：
+
+```text
+/route add 2 -1001234567890 -1009876543210 forward - 12345
+```
+
+目标不是论坛群时，省略 `destination_topic` 表示直接发送到该群。显式使用 `copy` 可以始终复制
+消息内容，不保留 Telegram 的“转发自”标记。
 
 动态转发路由保存在 `forwarder_routes` 表中。路由 ID 必须显式指定；重复执行相同的 `add`、
 `enable`、`disable` 或 `remove` 是幂等的，修改已有路由使用 `set`。

@@ -92,8 +92,23 @@ class NativeClient(Protocol):
     ) -> Awaitable[Sequence[NativeMessage]]: ...
 
     async def forward_messages(
-        self, target: object, message_ids: list[int], source: object
+        self,
+        target: object,
+        message_ids: list[int],
+        source: object,
+        *,
+        topic_id: int | None = None,
     ) -> Sequence[NativeMessage]: ...
+
+    async def create_forum_topic(
+        self,
+        chat: object,
+        title: str,
+        *,
+        random_id: int,
+    ) -> int: ...
+
+    async def edit_forum_topic(self, chat: object, topic_id: int, *, title: str) -> None: ...
 
     async def send_message(
         self,
@@ -335,10 +350,60 @@ class TelethonClientAdapter:
         )
 
     async def forward_messages(
-        self, target: object, message_ids: list[int], source: object
+        self,
+        target: object,
+        message_ids: list[int],
+        source: object,
+        *,
+        topic_id: int | None = None,
     ) -> Sequence[NativeMessage]:
-        messages = await self._client.forward_messages(target, message_ids, from_peer=source)
-        return tuple(_StableMessage(message, chat=target) for message in messages)
+        if topic_id is None:
+            messages = await self._client.forward_messages(target, message_ids, from_peer=source)
+        else:
+            functions = cast(Any, import_module("telethon.tl.functions.messages"))
+            target_peer = await self._client.get_input_entity(target)
+            request = functions.ForwardMessagesRequest(
+                from_peer=await self._client.get_input_entity(source),
+                id=message_ids,
+                to_peer=target_peer,
+                top_msg_id=topic_id,
+            )
+            result = await self._client(request)
+            messages = self._client._get_response_message(request, result, target_peer)
+        items = messages if isinstance(messages, Sequence) else (messages,)
+        if any(message is None for message in items):
+            raise RuntimeError("Telegram did not return every forwarded message")
+        return tuple(_StableMessage(message, chat=target) for message in items)
+
+    async def create_forum_topic(
+        self,
+        chat: object,
+        title: str,
+        *,
+        random_id: int,
+    ) -> int:
+        functions = cast(Any, import_module("telethon.tl.functions.messages"))
+        target_peer = await self._client.get_input_entity(chat)
+        request = functions.CreateForumTopicRequest(
+            peer=target_peer,
+            title=title,
+            random_id=random_id,
+        )
+        result = await self._client(request)
+        message = self._client._get_response_message(request, result, target_peer)
+        if message is None or int(message.id) <= 0:
+            raise RuntimeError("Telegram did not return the created forum topic")
+        return int(message.id)
+
+    async def edit_forum_topic(self, chat: object, topic_id: int, *, title: str) -> None:
+        functions = cast(Any, import_module("telethon.tl.functions.messages"))
+        await self._client(
+            functions.EditForumTopicRequest(
+                peer=await self._client.get_input_entity(chat),
+                topic_id=topic_id,
+                title=title,
+            )
+        )
 
     async def send_message(
         self,
@@ -431,6 +496,9 @@ class _StableFile:
         self.message = message
         raw = cast(Any, message)
         self.payload = raw.photo or raw.document
+        file_name = getattr(raw.file, "name", None)
+        extension = getattr(raw.file, "ext", None)
+        self.name = file_name or (f"file{extension}" if extension else None)
         self._attributes = tuple(getattr(raw.document, "attributes", ()) or ())
 
 

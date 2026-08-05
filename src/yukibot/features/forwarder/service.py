@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from .errors import (
@@ -23,6 +23,7 @@ from .models import (
     ServiceKind,
 )
 from .ports import MessageLinkRepository, RouteRepository, TelegramGateway
+from .topics import ManagedTopicService
 
 
 class SyncOperation(StrEnum):
@@ -95,20 +96,32 @@ class ForwarderService:
     links: MessageLinkRepository
     telegram: TelegramGateway
     options: ForwarderOptions = field(default_factory=ForwarderOptions)
+    topics: ManagedTopicService | None = None
     _route_locks: dict[int, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
 
     async def forward_message(self, message: IncomingMessage) -> ForwardingReport:
-        if message.outgoing:
+        new_title = _changed_title(message)
+        if message.outgoing and new_title is None:
             return ForwardingReport(ignored_reason="outgoing_message")
 
         candidates = await self.routes.list_for_source_chat(message.ref.chat_id)
-        matched = tuple(route for route in candidates if route.matches(message))
+        matched = (
+            ()
+            if message.outgoing
+            else tuple(route for route in candidates if route.matches(message))
+        )
+        matched_ids = {route.id for route in matched}
         outcomes: list[DeliveryOutcome] = []
         failures: list[DeliveryFailure] = []
 
-        for route in matched:
+        for route in candidates:
+            if route.id not in matched_ids and (new_title is None or not route.enabled):
+                continue
             async with self._route_lock(route.id):
                 try:
+                    effective_route = await self._resolve_destination(route, source_title=new_title)
+                    if route.id not in matched_ids:
+                        continue
                     existing = await self.links.get(route.id, message.ref)
                     if existing is not None:
                         outcomes.append(
@@ -122,7 +135,11 @@ class ForwarderService:
                         )
                         continue
                     reply_to = await self._resolve_reply(message, route)
-                    destination, mode_used = await self._deliver_one(message, route, reply_to)
+                    destination, mode_used = await self._deliver_one(
+                        message,
+                        effective_route,
+                        reply_to,
+                    )
                     link = MessageLink(route.id, message.ref, destination)
                     await self.links.save_many((link,))
                     outcomes.append(
@@ -168,7 +185,12 @@ class ForwarderService:
                             f"route {route.id} has an incomplete persisted album mapping"
                         )
                     reply_to = await self._resolve_reply(first, route)
-                    destinations, mode_used = await self._deliver_album(ordered, route, reply_to)
+                    effective_route = await self._resolve_destination(route)
+                    destinations, mode_used = await self._deliver_album(
+                        ordered,
+                        effective_route,
+                        reply_to,
+                    )
                     if len(destinations) != len(ordered):
                         raise DeliveryResultMismatch(
                             f"sent {len(ordered)} album items but received "
@@ -296,6 +318,19 @@ class ForwarderService:
         mapping = await self.links.get(route.id, parent)
         return mapping.destination.message_id if mapping is not None else None
 
+    async def _resolve_destination(
+        self,
+        route: Route,
+        *,
+        source_title: str | None = None,
+    ) -> Route:
+        if self.topics is None:
+            return route
+        destination = await self.topics.resolve(route, source_title=source_title)
+        return (
+            route if destination == route.destination else replace(route, destination=destination)
+        )
+
     def _route_lock(self, route_id: int) -> asyncio.Lock:
         return self._route_locks.setdefault(route_id, asyncio.Lock())
 
@@ -353,3 +388,10 @@ def format_service_message(message: IncomingMessage) -> str:
     if service.kind is ServiceKind.TOPIC_REOPENED:
         return f"The topic was reopened{topic_suffix}."
     return f"A system event occurred{topic_suffix}."
+
+
+def _changed_title(message: IncomingMessage) -> str | None:
+    service = message.service
+    if service is None or service.kind is not ServiceKind.TITLE_CHANGED:
+        return None
+    return service.new_title

@@ -7,11 +7,13 @@ from dataclasses import dataclass, replace
 from .errors import RouteNotFoundError
 from .models import Route
 from .ports import RouteRepository
+from .topics import ManagedTopicService
 
 
 @dataclass(slots=True)
 class ForwarderManagementService:
     routes: RouteRepository
+    topics: ManagedTopicService | None = None
 
     async def list_routes(self) -> tuple[Route, ...]:
         return tuple(await self.routes.list_all())
@@ -29,9 +31,11 @@ class ForwarderManagementService:
         )
         if existing is not None:
             if existing == route:
+                await self._prepare_topic(existing)
                 return existing
             raise ValueError(f"route {route.id} already exists with different configuration")
         await self.routes.add(route)
+        await self._prepare_topic(route)
         return route
 
     async def replace_route(self, route: Route) -> Route:
@@ -39,12 +43,18 @@ class ForwarderManagementService:
             await self.routes.replace(route)
         except KeyError as error:
             raise RouteNotFoundError(f"route {route.id} does not exist") from error
+        await self._prepare_topic(route)
         return route
 
     async def set_enabled(self, route_id: int, *, enabled: bool) -> Route:
         route = replace(await self.get_route(route_id), enabled=enabled)
         await self.routes.replace(route)
+        await self._prepare_topic(route)
         return route
 
     async def remove_route(self, route_id: int) -> None:
         await self.routes.remove(route_id)
+
+    async def _prepare_topic(self, route: Route) -> None:
+        if route.enabled and self.topics is not None:
+            await self.topics.resolve(route)

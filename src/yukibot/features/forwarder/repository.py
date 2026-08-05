@@ -11,6 +11,7 @@ from .models import (
     ContentType,
     DestinationEndpoint,
     ForwardMode,
+    ManagedTopic,
     MessageFilter,
     MessageLink,
     MessageRef,
@@ -157,6 +158,41 @@ class SqliteMessageLinkRepository:
         )
 
 
+class SqliteManagedTopicRepository:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    async def get(self, source_chat_id: int, destination_chat_id: int) -> ManagedTopic | None:
+        row = await self._database.fetch_one(
+            """
+            SELECT source_chat_id, destination_chat_id, topic_id, title
+            FROM forwarder_managed_topics
+            WHERE source_chat_id = ? AND destination_chat_id = ?
+            """,
+            (source_chat_id, destination_chat_id),
+        )
+        return _managed_topic_from_row(row) if row is not None else None
+
+    async def save(self, topic: ManagedTopic) -> None:
+        await self._database.execute(
+            """
+            INSERT INTO forwarder_managed_topics (
+                source_chat_id, destination_chat_id, topic_id, title
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT (source_chat_id, destination_chat_id) DO UPDATE SET
+                topic_id = excluded.topic_id,
+                title = excluded.title,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                topic.source_chat_id,
+                topic.destination_chat_id,
+                topic.topic_id,
+                topic.title,
+            ),
+        )
+
+
 async def _list_routes(connection: DatabaseConnection) -> tuple[Route, ...]:
     rows = await connection.fetch_all(f"SELECT {_ROUTE_COLUMNS} FROM forwarder_routes ORDER BY id")
     return tuple(_route_from_row(row) for row in rows)
@@ -223,6 +259,15 @@ def _link_from_row(row: Row) -> MessageLink:
             _int_column(row, "destination_chat_id"),
             _int_column(row, "destination_message_id"),
         ),
+    )
+
+
+def _managed_topic_from_row(row: Row) -> ManagedTopic:
+    return ManagedTopic(
+        source_chat_id=_int_column(row, "source_chat_id"),
+        destination_chat_id=_int_column(row, "destination_chat_id"),
+        topic_id=_int_column(row, "topic_id"),
+        title=_str_column(row, "title"),
     )
 
 

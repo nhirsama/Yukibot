@@ -1,11 +1,17 @@
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import telethon
 from telethon import TelegramClient, events
 from telethon.tl import types
 from telethon.tl.custom.message import Message
+from telethon.tl.functions.messages import (
+    CreateForumTopicRequest,
+    EditForumTopicRequest,
+    ForwardMessagesRequest,
+)
 
 from yukibot.adapters.telegram import (
     TelethonClientAdapter,
@@ -27,6 +33,65 @@ def test_stable_telethon_api_matches_adapter(tmp_path: Path) -> None:
         events.MessageEdited,
         events.MessageDeleted,
     )
+
+
+async def test_stable_adapter_uses_raw_topic_requests() -> None:
+    source = types.InputPeerChannel(1001, 11)
+    target = types.InputPeerChannel(2001, 22)
+    forwarded = SimpleNamespace(
+        id=101,
+        chat_id=-1000000002001,
+        sender_id=42,
+        grouped_id=None,
+        raw_text="hello",
+        entities=(),
+        date=datetime.now(UTC),
+        chat=None,
+        input_chat=target,
+        sender=None,
+        input_sender=None,
+        photo=None,
+        audio=None,
+        video=None,
+        file=None,
+        reply_to_msg_id=None,
+        out=True,
+        noforwards=False,
+    )
+
+    class RawClient:
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def get_input_entity(self, peer):  # type: ignore[no-untyped-def]
+            return peer
+
+        async def __call__(self, request):  # type: ignore[no-untyped-def]
+            self.requests.append(request)
+            return object()
+
+        def _get_response_message(self, request, result, peer):  # type: ignore[no-untyped-def]
+            if isinstance(request, ForwardMessagesRequest):
+                return [forwarded]
+            if isinstance(request, CreateForumTopicRequest):
+                return SimpleNamespace(id=303)
+            raise AssertionError("unexpected response conversion")
+
+    raw = RawClient()
+    client = TelethonClientAdapter(raw)
+
+    messages = await client.forward_messages(target, [7], source, topic_id=99)
+    topic_id = await client.create_forum_topic(target, "Source", random_id=123)
+    await client.edit_forum_topic(target, topic_id, title="Renamed")
+
+    assert [message.id for message in messages] == [101]
+    assert topic_id == 303
+    assert isinstance(raw.requests[0], ForwardMessagesRequest)
+    assert raw.requests[0].top_msg_id == 99
+    assert isinstance(raw.requests[1], CreateForumTopicRequest)
+    assert raw.requests[1].random_id == 123
+    assert isinstance(raw.requests[2], EditForumTopicRequest)
+    assert raw.requests[2].topic_id == 303
 
 
 async def test_stable_telethon_message_reaches_the_application_contract(tmp_path: Path) -> None:

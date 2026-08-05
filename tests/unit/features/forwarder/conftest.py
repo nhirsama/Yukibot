@@ -30,6 +30,38 @@ class FakeTelegramGateway:
         self.next_message_id = 1000
         self.reject_native_forward = False
         self.not_modified_targets: set[MessageRef] = set()
+        self.chat_titles: dict[int, str] = {}
+        self.forum_chats: set[int] = set()
+        self.created_topics: list[tuple[int, str, int]] = []
+        self.edited_topics: list[tuple[int, int, str]] = []
+        self.next_topic_id = 500
+
+    def chat_title(self, chat_id: int) -> str:
+        return self.chat_titles.get(chat_id, str(chat_id))
+
+    def is_forum(self, chat_id: int) -> bool:
+        return chat_id in self.forum_chats
+
+    async def create_forum_topic(
+        self,
+        destination_chat_id: int,
+        title: str,
+        *,
+        random_id: int,
+    ) -> int:
+        self.created_topics.append((destination_chat_id, title, random_id))
+        topic_id = self.next_topic_id
+        self.next_topic_id += 1
+        return topic_id
+
+    async def edit_forum_topic(
+        self,
+        destination_chat_id: int,
+        topic_id: int,
+        *,
+        title: str,
+    ) -> None:
+        self.edited_topics.append((destination_chat_id, topic_id, title))
 
     async def deliver_message(
         self,

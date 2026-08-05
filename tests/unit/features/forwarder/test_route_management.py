@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import pytest
+from conftest import FakeTelegramGateway
 
-from yukibot.features.forwarder import DestinationEndpoint, Route, SourceEndpoint
-from yukibot.features.forwarder.commands import ROUTE_HELP
+from yukibot.features.forwarder import (
+    DestinationEndpoint,
+    ForwardMode,
+    InMemoryManagedTopicRepository,
+    ManagedTopicService,
+    Route,
+    SourceEndpoint,
+)
+from yukibot.features.forwarder.commands import ROUTE_HELP, ForwarderCommands
 from yukibot.features.forwarder.management import ForwarderManagementService
+from yukibot.kernel import ControlCommand
 
 
 class MemoryRoutes:
@@ -35,6 +44,30 @@ class MemoryRoutes:
 
 def test_help_response_cannot_be_recognized_as_an_outgoing_command() -> None:
     assert not ROUTE_HELP.startswith("/")
+
+
+async def test_route_command_defaults_to_forward_with_copy_fallback() -> None:
+    routes = MemoryRoutes()
+    commands = ForwarderCommands(ForwarderManagementService(routes))
+
+    result = await commands.handle(ControlCommand("/route", "add 7 -1001 -2001", -9, 1, 42, True))
+
+    assert result.text == "Route 7 is configured."
+    assert routes.routes[7].mode is ForwardMode.FORWARD
+    assert routes.routes[7].fallback_to_copy
+
+
+async def test_adding_route_prepares_automatic_forum_topic_immediately() -> None:
+    routes = MemoryRoutes()
+    telegram = FakeTelegramGateway()
+    telegram.forum_chats.add(-2001)
+    telegram.chat_titles[-1001] = "Source channel"
+    topics = ManagedTopicService(InMemoryManagedTopicRepository(), telegram)
+    service = ForwarderManagementService(routes, topics)
+
+    await service.add_route(Route(7, SourceEndpoint(-1001), DestinationEndpoint(-2001)))
+
+    assert telegram.created_topics[0][0:2] == (-2001, "Source channel")
 
 
 async def test_route_management_uses_explicit_idempotent_desired_state() -> None:

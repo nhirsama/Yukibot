@@ -74,6 +74,25 @@ FORWARDER_MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        scope="forwarder",
+        version=3,
+        description="store automatically managed forum topics",
+        statements=(
+            """
+            CREATE TABLE forwarder_managed_topics (
+                source_chat_id INTEGER NOT NULL,
+                destination_chat_id INTEGER NOT NULL,
+                topic_id INTEGER NOT NULL CHECK (topic_id > 0),
+                title TEXT NOT NULL CHECK (length(title) > 0),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (source_chat_id, destination_chat_id),
+                UNIQUE (destination_chat_id, topic_id)
+            )
+            """,
+        ),
+    ),
 )
 
 __all__ = ["FORWARDER_MIGRATIONS"]

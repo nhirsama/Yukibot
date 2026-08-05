@@ -14,12 +14,17 @@ from .errors import (
     RouteNotFoundError,
 )
 from .forwarder import Forwarder
-from .memory import InMemoryMessageLinkRepository, InMemoryRouteRepository
+from .memory import (
+    InMemoryManagedTopicRepository,
+    InMemoryMessageLinkRepository,
+    InMemoryRouteRepository,
+)
 from .models import (
     ContentType,
     DestinationEndpoint,
     ForwardMode,
     IncomingMessage,
+    ManagedTopic,
     MessageFilter,
     MessageLink,
     MessageRef,
@@ -30,7 +35,7 @@ from .models import (
     SourceEndpoint,
     normalize_general_topic,
 )
-from .ports import MessageLinkRepository, RouteRepository, TelegramGateway
+from .ports import ManagedTopicRepository, MessageLinkRepository, RouteRepository, TelegramGateway
 from .routing import assert_acyclic_routes
 from .service import (
     DeliveryFailure,
@@ -43,6 +48,7 @@ from .service import (
     SyncReport,
     format_service_message,
 )
+from .topics import ManagedTopicService
 
 __all__ = [
     "AlbumBuffer",
@@ -57,9 +63,13 @@ __all__ = [
     "ForwarderOptions",
     "ForwarderService",
     "ForwardingReport",
+    "InMemoryManagedTopicRepository",
     "InMemoryMessageLinkRepository",
     "InMemoryRouteRepository",
     "IncomingMessage",
+    "ManagedTopic",
+    "ManagedTopicRepository",
+    "ManagedTopicService",
     "MessageFilter",
     "MessageLink",
     "MessageLinkRepository",

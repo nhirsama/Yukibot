@@ -23,10 +23,12 @@ from yukibot.features.forwarder.job_repository import SqliteForwardJobRepository
 from yukibot.features.forwarder.management import ForwarderManagementService
 from yukibot.features.forwarder.migrations import FORWARDER_MIGRATIONS
 from yukibot.features.forwarder.repository import (
+    SqliteManagedTopicRepository,
     SqliteMessageLinkRepository,
     SqliteRouteRepository,
 )
 from yukibot.features.forwarder.service import ForwarderService
+from yukibot.features.forwarder.topics import ManagedTopicService
 from yukibot.features.forwarder.worker import ForwardJobProcessor, ForwardJobRunner
 from yukibot.features.management.commands import ManagementCommands
 from yukibot.features.management.feature import ManagementFeature
@@ -86,9 +88,13 @@ def build_runtime(
     telegram_gateway = TelethonGateway(client, peers, request_limiter=request_limiter)
     routes = SqliteRouteRepository(database)
     links = SqliteMessageLinkRepository(database)
+    managed_topics = ManagedTopicService(
+        SqliteManagedTopicRepository(database),
+        telegram_gateway,
+    )
     jobs = SqliteForwardJobRepository(database)
-    service = ForwarderService(routes, links, telegram_gateway)
-    forwarder_management = ForwarderManagementService(routes)
+    service = ForwarderService(routes, links, telegram_gateway, topics=managed_topics)
+    forwarder_management = ForwarderManagementService(routes, managed_topics)
     forwarder_commands = ForwarderCommands(forwarder_management)
     processor = ForwardJobProcessor(service)
     runner = ForwardJobRunner(jobs, processor)

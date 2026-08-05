@@ -9,8 +9,10 @@
 - 来源 chat/topic 到目标 chat/topic 的多路由匹配；
 - 不区分大小写的关键词过滤；
 - 内容类型白名单、黑名单及服务消息开关；
-- native forward 和 copy 模式；
+- 默认 native forward 和显式 copy 模式；
 - native forward 受限时按路由回退到 copy；
+- 向论坛群转发时自动创建、复用与源频道同名的话题；
+- 源频道改名时同步自动话题名称；
 - 回复链 source/destination message ID 映射；
 - 相册按 `(chat_id, grouped_id)` 缓冲、排序并整体发送；
 - 编辑与删除同步；
@@ -30,6 +32,7 @@ Forwarder / ForwarderService
         |
         +-- RouteRepository
         +-- MessageLinkRepository
+        +-- ManagedTopicRepository
 ```
 
 核心模块不会创建 Telethon client、读取环境变量、注册事件 handler、处理管理员命令或决定数据库。
@@ -47,6 +50,10 @@ Forwarder / ForwarderService
 
 Telethon update 到应用事件的规范化由共享的 `adapters/telegram/event_source.py` 负责，功能专用
 gateway 不注册 handler，也不拥有 client 生命周期。
+
+未显式配置 `DestinationEndpoint.topic_id` 时，`ManagedTopicService` 会先判断目标是否为论坛群。
+论坛群使用 `(source_chat_id, destination_chat_id)` 持久化自动话题；创建请求使用稳定 random ID，
+让创建成功但映射尚未落库时的重试仍保持幂等。显式话题和普通群不会进入自动话题管理。
 
 格式化实体和媒体不被复制到领域模型。gateway 收到稳定的 `MessageRef` 后，应使用 Telethon 读取、
 复制或转发原始消息，从而完整保留 Telegram 能力且不污染业务边界。

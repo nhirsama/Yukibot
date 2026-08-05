@@ -18,7 +18,8 @@ ROUTE_HELP = """转发路由命令:
 /route enable <id> - 启用路由
 /route disable <id> - 停用路由
 /route remove <id> - 删除路由
-选项: [copy|forward] [source_topic|-] [destination_topic|-]"""
+选项: [forward|copy] [source_topic|-] [destination_topic|-]
+默认使用 forward; 目标为论坛且 destination_topic 为 - 时, 自动创建与源频道同名的话题。"""
 
 
 class ForwarderCommands:
@@ -66,7 +67,7 @@ def _parse_route(arguments: list[str]) -> Route:
     route_id = int(arguments[0])
     source_chat = int(arguments[1])
     destination_chat = int(arguments[2])
-    mode = ForwardMode(arguments[3]) if len(arguments) >= 4 else ForwardMode.COPY
+    mode = ForwardMode(arguments[3]) if len(arguments) >= 4 else ForwardMode.FORWARD
     source_topic = _topic_id(arguments[4]) if len(arguments) >= 5 else None
     destination_topic = _topic_id(arguments[5]) if len(arguments) >= 6 else None
     return Route(

@@ -18,6 +18,7 @@ class FakePeerId:
 class FakePeer:
     value: int
     name: str = "peer"
+    forum: bool = False
 
     @property
     def id(self) -> FakePeerId:
@@ -149,10 +150,40 @@ class FakeNativeClient:
             if (int(chat.id), message_id) in self.messages
         )
 
-    async def forward_messages(self, target, message_ids, source):  # type: ignore[no-untyped-def]
+    async def forward_messages(
+        self,
+        target,
+        message_ids,
+        source,
+        *,
+        topic_id=None,  # type: ignore[no-untyped-def]
+    ):
         self.raise_error()
-        self.calls.append(("forward", int(target.id), tuple(message_ids), int(source.id)))
+        self.calls.append(("forward", int(target.id), tuple(message_ids), int(source.id), topic_id))
         return tuple(self.sent(target) for _ in message_ids)
+
+    async def create_forum_topic(
+        self,
+        chat,
+        title,
+        *,
+        random_id,  # type: ignore[no-untyped-def]
+    ):
+        self.raise_error()
+        self.calls.append(("topic-create", int(chat.id), title, random_id))
+        topic_id = self.next_id
+        self.next_id += 1
+        return topic_id
+
+    async def edit_forum_topic(
+        self,
+        chat,
+        topic_id,
+        *,
+        title,  # type: ignore[no-untyped-def]
+    ) -> None:
+        self.raise_error()
+        self.calls.append(("topic-edit", int(chat.id), topic_id, title))
 
     async def send_message(
         self,

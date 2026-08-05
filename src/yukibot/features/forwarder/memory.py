@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable, Sequence
 
-from .models import MessageLink, MessageRef, Route
+from .models import ManagedTopic, MessageLink, MessageRef, Route
 from .routing import assert_acyclic_routes
 
 
@@ -78,3 +78,19 @@ class InMemoryMessageLinkRepository:
     async def count(self) -> int:
         async with self._lock:
             return len(self._links)
+
+
+class InMemoryManagedTopicRepository:
+    def __init__(self, topics: Iterable[ManagedTopic] = ()) -> None:
+        self._topics = {
+            (topic.source_chat_id, topic.destination_chat_id): topic for topic in topics
+        }
+        self._lock = asyncio.Lock()
+
+    async def get(self, source_chat_id: int, destination_chat_id: int) -> ManagedTopic | None:
+        async with self._lock:
+            return self._topics.get((source_chat_id, destination_chat_id))
+
+    async def save(self, topic: ManagedTopic) -> None:
+        async with self._lock:
+            self._topics[(topic.source_chat_id, topic.destination_chat_id)] = topic

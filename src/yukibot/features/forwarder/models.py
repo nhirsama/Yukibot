@@ -29,6 +29,7 @@ __all__ = [
     "DestinationEndpoint",
     "ForwardMode",
     "IncomingMessage",
+    "ManagedTopic",
     "MessageFilter",
     "MessageLink",
     "MessageRef",
@@ -94,6 +95,24 @@ class DestinationEndpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedTopic:
+    """A topic created and named from one source chat in one destination forum."""
+
+    source_chat_id: int
+    destination_chat_id: int
+    topic_id: int
+    title: str
+
+    def __post_init__(self) -> None:
+        _validate_chat_id(self.source_chat_id)
+        _validate_chat_id(self.destination_chat_id)
+        if self.topic_id <= 0:
+            raise ValueError("topic_id must be positive")
+        if not self.title:
+            raise ValueError("topic title must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class MessageFilter:
     keywords: tuple[str, ...] = ()
     allowed_content_types: frozenset[ContentType] = field(default_factory=frozenset)
@@ -131,7 +150,7 @@ class Route:
     id: int
     source: SourceEndpoint
     destination: DestinationEndpoint
-    mode: ForwardMode = ForwardMode.COPY
+    mode: ForwardMode = ForwardMode.FORWARD
     message_filter: MessageFilter = field(default_factory=MessageFilter)
     enabled: bool = True
     fallback_to_copy: bool = True

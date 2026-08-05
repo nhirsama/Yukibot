@@ -7,6 +7,7 @@ from yukibot.features.forwarder import (
     ContentType,
     DestinationEndpoint,
     ForwardMode,
+    ManagedTopic,
     MessageFilter,
     MessageLink,
     MessageRef,
@@ -16,6 +17,7 @@ from yukibot.features.forwarder import (
 )
 from yukibot.features.forwarder.migrations import FORWARDER_MIGRATIONS
 from yukibot.features.forwarder.repository import (
+    SqliteManagedTopicRepository,
     SqliteMessageLinkRepository,
     SqliteRouteRepository,
 )
@@ -105,3 +107,25 @@ async def test_message_links_are_upserted_queried_and_cascade_deleted(tmp_path: 
         assert await links.get(1, source) is None
     finally:
         await database.close()
+
+
+async def test_managed_topics_are_upserted_and_persisted(tmp_path: Path) -> None:
+    path = tmp_path / "topics.db"
+    database, _, _ = await open_repositories(path)
+    topics = SqliteManagedTopicRepository(database)
+    original = ManagedTopic(-1001, -2001, 50, "Source channel")
+    renamed = ManagedTopic(-1001, -2001, 50, "Renamed channel")
+    try:
+        assert await topics.get(-1001, -2001) is None
+        await topics.save(original)
+        await topics.save(renamed)
+        assert await topics.get(-1001, -2001) == renamed
+    finally:
+        await database.close()
+
+    reopened = SqliteDatabase(database_url(path))
+    await reopened.open()
+    try:
+        assert await SqliteManagedTopicRepository(reopened).get(-1001, -2001) == renamed
+    finally:
+        await reopened.close()

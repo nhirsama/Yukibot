@@ -46,6 +46,58 @@ class TelethonGateway:
             messages_per_second=messages_per_second,
         )
 
+    def chat_title(self, chat_id: int) -> str:
+        peer = self._peer(chat_id)
+        title = getattr(peer, "title", None) or getattr(peer, "name", None)
+        if isinstance(title, str) and title.strip():
+            return title
+        parts = (
+            value
+            for value in (getattr(peer, "first_name", None), getattr(peer, "last_name", None))
+            if isinstance(value, str) and value.strip()
+        )
+        return " ".join(parts) or str(chat_id)
+
+    def is_forum(self, chat_id: int) -> bool:
+        peer = self._peers.get(chat_id)
+        return peer is not None and bool(getattr(peer, "forum", False))
+
+    async def create_forum_topic(
+        self,
+        destination_chat_id: int,
+        title: str,
+        *,
+        random_id: int,
+    ) -> int:
+        async with self._request_limiter.slot(destination_chat_id):
+            try:
+                return await self._client.create_forum_topic(
+                    self._peer(destination_chat_id),
+                    title,
+                    random_id=random_id,
+                )
+            except Exception as error:
+                raise _translate_error(error) from error
+
+    async def edit_forum_topic(
+        self,
+        destination_chat_id: int,
+        topic_id: int,
+        *,
+        title: str,
+    ) -> None:
+        async with self._request_limiter.slot(destination_chat_id):
+            try:
+                await self._client.edit_forum_topic(
+                    self._peer(destination_chat_id),
+                    topic_id,
+                    title=title,
+                )
+            except Exception as error:
+                if type(error).__name__ == "TopicNotModifiedError":
+                    return
+                raise _translate_error(error) from error
+
     async def deliver_message(
         self,
         message: IncomingMessage,
@@ -151,15 +203,20 @@ class TelethonGateway:
         destination: DestinationEndpoint,
         reply_to_message_id: int | None,
     ) -> Sequence[NativeMessage]:
-        if destination.topic_id is not None or reply_to_message_id is not None:
-            raise NativeForwardUnsupported("Telethon native forward has no topic/reply option")
+        if reply_to_message_id is not None:
+            raise NativeForwardUnsupported(
+                "Telegram native forward cannot preserve an ordinary reply target"
+            )
         if any(not message.can_forward for message in messages):
             raise NativeForwardUnsupported("source content has forwarding protection")
         source = messages[0].chat
         if any(peer_dialog_id(message.chat) != peer_dialog_id(source) for message in messages):
             raise ValueError("native forwarded messages must share a source chat")
         return await self._client.forward_messages(
-            target, [message.id for message in messages], source
+            target,
+            [message.id for message in messages],
+            source,
+            topic_id=destination.topic_id,
         )
 
     async def _copy_one(
@@ -171,16 +228,21 @@ class TelethonGateway:
     ) -> NativeMessage:
         reply_to = _effective_reply(destination, reply_to_message_id)
         if source.file is not None:
+            data = BytesIO()
+            await self._client.download(source.file, data)
+            data.seek(0)
             if source.photo is not None:
+                data.name = "photo.jpg"
                 return await self._client.send_photo(
                     target,
-                    source.file,
+                    data,
                     caption_html=source.text_html,
                     reply_to=reply_to,
                 )
+            data.name = cast(str | None, getattr(source.file, "name", None)) or "file.bin"
             return await self._client.send_file(
                 target,
-                source.file,
+                data,
                 caption_html=source.text_html,
                 reply_to=reply_to,
             )

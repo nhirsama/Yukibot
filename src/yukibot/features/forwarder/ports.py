@@ -10,6 +10,7 @@ from .models import (
     DestinationEndpoint,
     ForwardMode,
     IncomingMessage,
+    ManagedTopic,
     MessageLink,
     MessageRef,
     Route,
@@ -40,6 +41,12 @@ class MessageLinkRepository(Protocol):
     async def remove(self, link: MessageLink) -> None: ...
 
 
+class ManagedTopicRepository(Protocol):
+    async def get(self, source_chat_id: int, destination_chat_id: int) -> ManagedTopic | None: ...
+
+    async def save(self, topic: ManagedTopic) -> None: ...
+
+
 class ForwardJobRepository(Protocol):
     async def enqueue(self, jobs: Sequence[PendingForwardJob]) -> int: ...
 
@@ -61,6 +68,26 @@ class ForwardJobRepository(Protocol):
 
 
 class TelegramGateway(Protocol):
+    def chat_title(self, chat_id: int) -> str: ...
+
+    def is_forum(self, chat_id: int) -> bool: ...
+
+    async def create_forum_topic(
+        self,
+        destination_chat_id: int,
+        title: str,
+        *,
+        random_id: int,
+    ) -> int: ...
+
+    async def edit_forum_topic(
+        self,
+        destination_chat_id: int,
+        topic_id: int,
+        *,
+        title: str,
+    ) -> None: ...
+
     async def deliver_message(
         self,
         message: IncomingMessage,
