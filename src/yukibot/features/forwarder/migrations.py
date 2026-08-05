@@ -93,6 +93,30 @@ FORWARDER_MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        scope="forwarder",
+        version=4,
+        description="store public chat references and polling cursors",
+        statements=(
+            """
+            ALTER TABLE forwarder_routes ADD COLUMN source_username TEXT
+            """,
+            """
+            ALTER TABLE forwarder_routes ADD COLUMN destination_username TEXT
+            """,
+            """
+            ALTER TABLE forwarder_routes ADD COLUMN poll_interval_seconds INTEGER
+                CHECK (poll_interval_seconds IS NULL OR poll_interval_seconds >= 60)
+            """,
+            """
+            CREATE TABLE forwarder_poll_cursors (
+                source_chat_id INTEGER PRIMARY KEY,
+                last_message_id INTEGER NOT NULL CHECK (last_message_id >= 0),
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+        ),
+    ),
 )
 
 __all__ = ["FORWARDER_MIGRATIONS"]

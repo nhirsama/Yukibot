@@ -11,14 +11,17 @@ from yukibot.features.forwarder import (
     MessageFilter,
     MessageLink,
     MessageRef,
+    PollCursor,
     Route,
     RouteCycleError,
+    RouteDraft,
     SourceEndpoint,
 )
 from yukibot.features.forwarder.migrations import FORWARDER_MIGRATIONS
 from yukibot.features.forwarder.repository import (
     SqliteManagedTopicRepository,
     SqliteMessageLinkRepository,
+    SqlitePollCursorRepository,
     SqliteRouteRepository,
 )
 
@@ -39,8 +42,13 @@ async def open_repositories(
 def route(route_id: int, source: int, destination: int) -> Route:
     return Route(
         route_id,
-        SourceEndpoint(source, topic_id=7),
-        DestinationEndpoint(destination, topic_id=11),
+        SourceEndpoint(
+            source,
+            topic_id=7,
+            username="source_channel",
+            poll_interval_seconds=300,
+        ),
+        DestinationEndpoint(destination, topic_id=11, username="target_group"),
         mode=ForwardMode.FORWARD,
         message_filter=MessageFilter(
             keywords=("Python",),
@@ -72,6 +80,23 @@ async def test_route_repository_round_trip_and_management(tmp_path: Path) -> Non
 
         assert await routes.remove(1)
         assert not await routes.remove(1)
+    finally:
+        await database.close()
+
+
+async def test_route_repository_allocates_id(tmp_path: Path) -> None:
+    database, routes, _ = await open_repositories(tmp_path / "auto-id.db")
+    try:
+        await routes.add(Route(7, SourceEndpoint(-7001), DestinationEndpoint(-7002)))
+        generated = await routes.add_auto(
+            RouteDraft(SourceEndpoint(-1001), DestinationEndpoint(-2001))
+        )
+
+        assert generated.id == 8
+        assert await routes.list_all() == (
+            Route(7, SourceEndpoint(-7001), DestinationEndpoint(-7002)),
+            generated,
+        )
     finally:
         await database.close()
 
@@ -129,3 +154,46 @@ async def test_managed_topics_are_upserted_and_persisted(tmp_path: Path) -> None
         assert await SqliteManagedTopicRepository(reopened).get(-1001, -2001) == renamed
     finally:
         await reopened.close()
+
+
+async def test_poll_cursor_only_moves_forward_and_survives_restart(tmp_path: Path) -> None:
+    path = tmp_path / "polling.db"
+    database, _, _ = await open_repositories(path)
+    cursors = SqlitePollCursorRepository(database)
+    try:
+        await cursors.save(PollCursor(-1001, 20))
+        await cursors.save(PollCursor(-1001, 10))
+        assert await cursors.get(-1001) == PollCursor(-1001, 20)
+    finally:
+        await database.close()
+
+    reopened = SqliteDatabase(database_url(path))
+    await reopened.open()
+    try:
+        assert await SqlitePollCursorRepository(reopened).get(-1001) == PollCursor(-1001, 20)
+    finally:
+        await reopened.close()
+
+
+async def test_v3_database_upgrades_without_changing_existing_routes(tmp_path: Path) -> None:
+    path = tmp_path / "upgrade-v3.db"
+    database = SqliteDatabase(database_url(path))
+    await database.open()
+    try:
+        await MigrationRunner(database, FORWARDER_MIGRATIONS[:3]).upgrade()
+        await database.execute(
+            """
+            INSERT INTO forwarder_routes (
+                id, source_chat_id, source_topic_id, destination_chat_id,
+                destination_topic_id, mode, filter_json, enabled, fallback_to_copy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, -1001, None, -2001, None, "forward", "{}", 1, 1),
+        )
+        await MigrationRunner(database, FORWARDER_MIGRATIONS).upgrade()
+
+        stored = await SqliteRouteRepository(database).list_all()
+        assert stored == (Route(1, SourceEndpoint(-1001), DestinationEndpoint(-2001)),)
+        assert await SqlitePollCursorRepository(database).get(-1001) is None
+    finally:
+        await database.close()

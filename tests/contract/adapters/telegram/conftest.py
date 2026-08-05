@@ -19,6 +19,8 @@ class FakePeer:
     value: int
     name: str = "peer"
     forum: bool = False
+    username: str | None = None
+    left: bool = False
 
     @property
     def id(self) -> FakePeerId:
@@ -104,6 +106,7 @@ class FakeNativeClient:
         self.next_id = 100
         self.error: Exception | None = None
         self.album: FakeAlbum | None = None
+        self.resolved: dict[int | str, FakePeer] = {}
 
     def add_event_handler(self, handler, event_cls):  # type: ignore[no-untyped-def]
         self.handlers[event_cls] = handler
@@ -149,6 +152,36 @@ class FakeNativeClient:
             for message_id in message_ids
             if (int(chat.id), message_id) in self.messages
         )
+
+    async def resolve_peer(self, reference: int | str) -> FakePeer:
+        self.calls.append(("resolve", reference))
+        return self.resolved[reference]
+
+    async def join_channel(self, peer: FakePeer) -> FakePeer:
+        self.calls.append(("join", int(peer.id)))
+        peer.left = False
+        return peer
+
+    async def get_latest_message_id(self, chat: FakePeer) -> int:
+        self.calls.append(("latest", int(chat.id)))
+        return max(
+            (message_id for chat_id, message_id in self.messages if chat_id == int(chat.id)),
+            default=0,
+        )
+
+    async def get_messages_after(
+        self,
+        chat: FakePeer,
+        after_message_id: int,
+        *,
+        limit: int,
+    ) -> tuple[FakeMessage, ...]:
+        self.calls.append(("history", int(chat.id), after_message_id, limit))
+        return tuple(
+            self.messages[key]
+            for key in sorted(self.messages)
+            if key[0] == int(chat.id) and key[1] > after_message_id
+        )[:limit]
 
     async def forward_messages(
         self,

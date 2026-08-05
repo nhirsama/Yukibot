@@ -197,6 +197,7 @@ async def test_runtime_control_plane_manages_modules_admins_and_routes(
         forwarder_album_delay=0,
     )
     client = FakeNativeClient()
+    client.dialogs = [FakeDialog(FakePeer(-1001)), FakeDialog(FakePeer(-2001))]
     runtime = build_runtime(settings, native_client=client)  # type: ignore[arg-type]
     ordinary_messages: list[TelegramMessageReceived] = []
 
@@ -249,13 +250,13 @@ async def test_runtime_control_plane_manages_modules_admins_and_routes(
         FakeMessage(
             4,
             chat,
-            text="/route add 7 -1001 -2001",
+            text="/route add -1001 -2001",
             sender=owner,
             outgoing=True,
         )
     )
     routes = await SqliteRouteRepository(runtime.database).list_all()
-    assert [route.id for route in routes] == [7]
+    assert [route.id for route in routes] == [1]
 
     await client.handlers[NewEvent](  # type: ignore[operator]
         FakeMessage(5, chat, text="/admin admin add 123", sender=owner, outgoing=True)
@@ -280,7 +281,7 @@ async def test_runtime_control_plane_manages_modules_admins_and_routes(
             outgoing=False,
         )
     )
-    assert "7: -1001 -> -2001" in str(client.calls[-1][2])
+    assert client.calls[-1][2] == "1: peer (-1001) -> peer (-2001) (forward, enabled)"
 
     calls_before_unknown = len(client.calls)
     await client.handlers[NewEvent](  # type: ignore[operator]

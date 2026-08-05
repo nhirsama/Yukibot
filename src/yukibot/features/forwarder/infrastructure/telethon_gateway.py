@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from io import BytesIO
 from typing import cast
 
@@ -13,6 +14,7 @@ from yukibot.adapters.telegram.client import (
     PeerRegistry,
     peer_dialog_id,
 )
+from yukibot.adapters.telegram.event_source import normalize_message
 from yukibot.adapters.telegram.rate_limit import TelegramRequestLimiter
 
 from ..errors import (
@@ -22,7 +24,15 @@ from ..errors import (
     PermanentDeliveryError,
     RetryAfter,
 )
-from ..models import ContentType, DestinationEndpoint, ForwardMode, IncomingMessage, MessageRef
+from ..models import (
+    ChatIdentity,
+    ContentType,
+    DestinationEndpoint,
+    ForwardMode,
+    IncomingMessage,
+    MessageRef,
+    SourceEndpoint,
+)
 
 
 class TelethonGateway:
@@ -46,8 +56,74 @@ class TelethonGateway:
             messages_per_second=messages_per_second,
         )
 
+    async def resolve_chat(self, reference: str) -> ChatIdentity:
+        native_reference: int | str
+        try:
+            native_reference = int(reference)
+        except ValueError:
+            username = reference.strip()
+            if not username.startswith("@") or len(username) == 1:
+                raise ValueError("频道用户名必须以 @ 开头") from None
+            native_reference = username
+        try:
+            peer = self._peers.get(native_reference) if isinstance(native_reference, int) else None
+            if peer is None:
+                peer = await self._client.resolve_peer(native_reference)
+                self._peers.remember(peer)
+            resolved_username = getattr(peer, "username", None)
+            return ChatIdentity(
+                peer_dialog_id(peer),
+                resolved_username
+                if isinstance(resolved_username, str) and resolved_username
+                else None,
+            )
+        except Exception as error:
+            raise _translate_error(error) from error
+
+    async def ensure_source(self, source: SourceEndpoint, *, join: bool) -> None:
+        try:
+            peer = await self._source_peer(source)
+            if join:
+                peer = await self._client.join_channel(peer)
+                self._peers.remember(peer)
+        except Exception as error:
+            raise _translate_error(error) from error
+
+    async def latest_message_id(self, source: SourceEndpoint) -> int:
+        async with self._request_limiter.slot(source.chat_id):
+            try:
+                return await self._client.get_latest_message_id(await self._source_peer(source))
+            except Exception as error:
+                raise _translate_error(error) from error
+
+    async def fetch_messages_after(
+        self,
+        source: SourceEndpoint,
+        after_message_id: int,
+        *,
+        limit: int,
+    ) -> Sequence[IncomingMessage]:
+        async with self._request_limiter.slot(source.chat_id):
+            try:
+                native_messages = await self._client.get_messages_after(
+                    await self._source_peer(source),
+                    after_message_id,
+                    limit=limit,
+                )
+                observed_at = datetime.now(UTC)
+                normalized = []
+                for message in native_messages:
+                    self._peers.remember(message.chat)
+                    self._peers.remember(message.sender)
+                    normalized.append(normalize_message(message, observed_at))
+                return tuple(normalized)
+            except Exception as error:
+                raise _translate_error(error) from error
+
     def chat_title(self, chat_id: int) -> str:
-        peer = self._peer(chat_id)
+        peer = self._peers.get(chat_id)
+        if peer is None:
+            return f"Channel {chat_id}"
         title = getattr(peer, "title", None) or getattr(peer, "name", None)
         if isinstance(title, str) and title.strip():
             return title
@@ -286,6 +362,34 @@ class TelethonGateway:
                 f"chat {chat_id} is not in the Telethon peer cache; open or join it first"
             )
         return peer
+
+    async def _source_peer(self, source: SourceEndpoint) -> NativePeer:
+        cached = self._peers.get(source.chat_id)
+        if cached is not None:
+            return cached
+
+        references: tuple[int | str, ...] = (
+            (source.chat_id, f"@{source.username}")
+            if source.username is not None
+            else (source.chat_id,)
+        )
+        last_error: Exception | None = None
+        for reference in references:
+            try:
+                peer = await self._client.resolve_peer(reference)
+            except Exception as error:
+                last_error = error
+                continue
+            if peer_dialog_id(peer) != source.chat_id:
+                last_error = ValueError(
+                    f"public username now resolves to a different chat than {source.chat_id}"
+                )
+                continue
+            self._peers.remember(peer)
+            return peer
+        if last_error is not None:
+            raise last_error
+        raise PermanentDeliveryError(f"cannot resolve source chat {source.chat_id}")
 
 
 def _effective_reply(

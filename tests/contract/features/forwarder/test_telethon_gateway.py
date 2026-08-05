@@ -15,6 +15,7 @@ from tests.contract.adapters.telegram.conftest import (
 )
 from yukibot.adapters.telegram import PeerRegistry
 from yukibot.features.forwarder import (
+    ChatIdentity,
     ContentType,
     DestinationEndpoint,
     ForwardMode,
@@ -22,6 +23,7 @@ from yukibot.features.forwarder import (
     MessageRef,
     NativeForwardUnsupported,
     RetryAfter,
+    SourceEndpoint,
     TelegramGateway,
 )
 from yukibot.features.forwarder.infrastructure import TelethonGateway
@@ -113,6 +115,41 @@ async def test_gateway_exposes_forum_metadata_and_topic_operations() -> None:
     assert client.calls == [
         ("topic-create", -2001, "Source channel", 77),
         ("topic-edit", -2001, 100, "Renamed channel"),
+    ]
+
+
+def test_missing_source_peer_uses_stable_topic_title_fallback() -> None:
+    gateway, _, _ = make_gateway()
+
+    assert gateway.chat_title(-3001) == "Channel -3001"
+
+
+async def test_gateway_resolves_username_joins_and_polls_public_source() -> None:
+    gateway, client, _ = make_gateway()
+    source_peer = FakePeer(-3001, "Public source", username="public_source", left=True)
+    client.resolved["@public_source"] = source_peer
+    client.messages[(-3001, 11)] = FakeMessage(11, source_peer, text="first")
+    client.messages[(-3001, 12)] = FakeMessage(12, source_peer, text="second")
+
+    identity = await gateway.resolve_chat("@public_source")
+    source = SourceEndpoint(
+        identity.chat_id,
+        username=identity.username,
+        poll_interval_seconds=300,
+    )
+    await gateway.ensure_source(source, join=True)
+    latest = await gateway.latest_message_id(source)
+    messages = await gateway.fetch_messages_after(source, 10, limit=100)
+
+    assert identity == ChatIdentity(-3001, "public_source")
+    assert not source_peer.left
+    assert latest == 12
+    assert [message.ref.message_id for message in messages] == [11, 12]
+    assert client.calls == [
+        ("resolve", "@public_source"),
+        ("join", -3001),
+        ("latest", -3001),
+        ("history", -3001, 10, 100),
     ]
 
 

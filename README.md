@@ -55,8 +55,8 @@ Forwarder 提供：
 ```text
 /route list
 /route show <id>
-/route add <id> <source_chat> <destination_chat> [forward|copy] [source_topic|-] [destination_topic|-]
-/route set <id> <source_chat> <destination_chat> [forward|copy] [source_topic|-] [destination_topic|-]
+/route add <source> <destination> [forward|copy] [source_topic|-] [destination_topic|-] [--poll <间隔>]
+/route set <id> <source> <destination> [forward|copy] [source_topic|-] [destination_topic|-] [--poll <间隔>]
 /route enable <id>
 /route disable <id>
 /route remove <id>
@@ -65,8 +65,12 @@ Forwarder 提供：
 例如：
 
 ```text
-/route add 1 -1001234567890 -1009876543210
+/route add @source_channel -1009876543210
 ```
+
+`source` 和 `destination` 都可以使用数字 ID 或 `@username`。Yukibot 会在配置时解析用户名，并同时
+保存稳定 ID 和公开用户名；路由列表优先显示用户名。默认实时模式会幂等地加入尚未加入的源频道。
+目标群不会自动加入，账号必须已经在目标群中并拥有发消息所需的权限。
 
 路由默认使用 Telegram 原生转发；来源禁止转发或当前操作无法原生转发时自动回退为复制。目标是
 论坛超级群且没有指定 `destination_topic` 时，Yukibot 会创建一个与源频道同名的话题并保存映射；
@@ -76,14 +80,25 @@ Forwarder 提供：
 要使用已有话题，可以显式传入话题 ID：
 
 ```text
-/route add 2 -1001234567890 -1009876543210 forward - 12345
+/route add -1001234567890 -1009876543210 forward - 12345
 ```
+
+对于不希望账号加入的公开源频道，可以指定轮询间隔：
+
+```text
+/route add @public_source -1009876543210 --poll 5m
+```
+
+间隔支持分钟、小时和天，例如 `5m`、`2h`、`1d`；不带单位的数字按分钟处理。轮询模式不会自动
+加入源频道，只适用于当前账号可以公开读取的频道。首次配置会把游标定位到频道当前最新消息，
+只转发之后出现的新消息，不回灌已有历史。游标在消息进入持久任务队列后推进并保存到 SQLite，
+重启后继续拉取。轮询模式不接收 Telegram 实时更新，因此不会同步已拉取消息之后发生的编辑和删除。
 
 目标不是论坛群时，省略 `destination_topic` 表示直接发送到该群。显式使用 `copy` 可以始终复制
 消息内容，不保留 Telegram 的“转发自”标记。
 
-动态转发路由保存在 `forwarder_routes` 表中。路由 ID 必须显式指定；重复执行相同的 `add`、
-`enable`、`disable` 或 `remove` 是幂等的，修改已有路由使用 `set`。
+动态转发路由保存在 `forwarder_routes` 表中。`add` 由数据库自动分配路由 ID，重复添加相同配置
+返回已有路由，不产生重复转发；`enable`、`disable` 和 `remove` 是幂等的，修改使用 `set <id>`。
 
 Forwarder handler 只将事件幂等写入 `forwarder_jobs`，由单个受监管 worker 按任务顺序发送。
 进程中断时，处于 `processing` 的任务会在下次启动恢复为 `pending`。严格 exactly-once 仍受

@@ -7,6 +7,7 @@ import telethon
 from telethon import TelegramClient, events
 from telethon.tl import types
 from telethon.tl.custom.message import Message
+from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import (
     CreateForumTopicRequest,
     EditForumTopicRequest,
@@ -140,6 +141,57 @@ async def test_stable_telethon_message_reaches_the_application_contract(tmp_path
             "download_media",
         )
     )
+
+
+async def test_stable_adapter_resolves_joins_and_reads_public_channel_history() -> None:
+    channel_type = type("Channel", (), {})
+    source = channel_type()
+    source.id = 1001
+    source.left = True
+    source.username = "public_source"
+    joined = channel_type()
+    joined.id = 1001
+    joined.left = False
+    joined.username = "public_source"
+
+    class RawSourceClient:
+        def __init__(self) -> None:
+            self.requests = []
+            self.iteration = None
+
+        async def get_entity(self, reference):  # type: ignore[no-untyped-def]
+            return joined if reference is source else source
+
+        async def get_input_entity(self, peer):  # type: ignore[no-untyped-def]
+            return "input-source"
+
+        async def __call__(self, request):  # type: ignore[no-untyped-def]
+            self.requests.append(request)
+            return object()
+
+        async def get_messages(self, chat, *, limit):  # type: ignore[no-untyped-def]
+            return [SimpleNamespace(id=88)]
+
+        async def iter_messages(self, chat, **kwargs):  # type: ignore[no-untyped-def]
+            self.iteration = (chat, kwargs)
+            if False:
+                yield None
+
+    raw = RawSourceClient()
+    client = TelethonClientAdapter(raw)
+
+    resolved = await client.resolve_peer("@public_source")
+    membership = await client.join_channel(resolved)
+    latest = await client.get_latest_message_id(membership)
+    history = await client.get_messages_after(membership, 80, limit=25)
+
+    assert resolved is source
+    assert membership is joined
+    assert latest == 88
+    assert history == ()
+    assert isinstance(raw.requests[0], JoinChannelRequest)
+    assert raw.requests[0].channel == "input-source"
+    assert raw.iteration == (joined, {"min_id": 80, "reverse": True, "limit": 25})
 
 
 def test_v2_alpha_session_is_migrated_without_losing_authorization(tmp_path: Path) -> None:

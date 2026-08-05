@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable, Sequence
 
-from .models import ManagedTopic, MessageLink, MessageRef, Route
+from .models import ManagedTopic, MessageLink, MessageRef, PollCursor, Route, RouteDraft
 from .routing import assert_acyclic_routes
 
 
 class InMemoryRouteRepository:
     def __init__(self, routes: Iterable[Route] = ()) -> None:
         self._routes = {route.id: route for route in routes}
+        self._next_id = max(self._routes, default=0) + 1
         assert_acyclic_routes(self._routes.values())
         self._lock = asyncio.Lock()
 
@@ -33,6 +34,15 @@ class InMemoryRouteRepository:
                 raise ValueError(f"route {route.id} already exists")
             assert_acyclic_routes((*self._routes.values(), route))
             self._routes[route.id] = route
+            self._next_id = max(self._next_id, route.id + 1)
+
+    async def add_auto(self, draft: RouteDraft) -> Route:
+        async with self._lock:
+            route = draft.bind(self._next_id)
+            assert_acyclic_routes((*self._routes.values(), route))
+            self._routes[route.id] = route
+            self._next_id += 1
+            return route
 
     async def replace(self, route: Route) -> None:
         async with self._lock:
@@ -94,3 +104,19 @@ class InMemoryManagedTopicRepository:
     async def save(self, topic: ManagedTopic) -> None:
         async with self._lock:
             self._topics[(topic.source_chat_id, topic.destination_chat_id)] = topic
+
+
+class InMemoryPollCursorRepository:
+    def __init__(self, cursors: Iterable[PollCursor] = ()) -> None:
+        self._cursors = {cursor.source_chat_id: cursor for cursor in cursors}
+        self._lock = asyncio.Lock()
+
+    async def get(self, source_chat_id: int) -> PollCursor | None:
+        async with self._lock:
+            return self._cursors.get(source_chat_id)
+
+    async def save(self, cursor: PollCursor) -> None:
+        async with self._lock:
+            existing = self._cursors.get(cursor.source_chat_id)
+            if existing is None or cursor.last_message_id > existing.last_message_id:
+                self._cursors[cursor.source_chat_id] = cursor

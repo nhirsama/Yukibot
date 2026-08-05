@@ -22,6 +22,7 @@ from yukibot.kernel import (
 )
 
 from .jobs import ForwardJobEvent, pending_jobs_for_event
+from .poller import SourcePoller
 from .worker import ForwardJobRunner
 
 
@@ -40,6 +41,7 @@ class ForwarderFeature:
         stop_timeout: float = 15.0,
         clock: Callable[[], float] = time.time,
         logger: logging.Logger | None = None,
+        poller: SourcePoller | None = None,
     ) -> None:
         if album_delay < 0:
             raise ValueError("album_delay must not be negative")
@@ -59,6 +61,8 @@ class ForwarderFeature:
         self._subscriptions: list[Subscription] = []
         self._worker: asyncio.Task[None] | None = None
         self._logger = logger or logging.getLogger(__name__)
+        self._poller = poller
+        self._polling_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self._worker is not None:
@@ -86,6 +90,13 @@ class ForwarderFeature:
                     help_text=ROUTE_HELP,
                     handler=self._command_handler,
                 )
+            if self._poller is not None:
+                self._poller.prepare()
+                self._polling_task = self._supervisor.create_task(
+                    self._poller.run(),
+                    name="forwarder:source-poller",
+                    critical=True,
+                )
         except BaseException:
             if self._command_subscription is not None:
                 self._command_subscription.unregister()
@@ -94,6 +105,12 @@ class ForwarderFeature:
                 subscription.unsubscribe()
             self._subscriptions.clear()
             self._runner.request_stop()
+            if self._poller is not None:
+                self._poller.request_stop()
+            if self._polling_task is not None:
+                self._polling_task.cancel()
+                await asyncio.gather(self._polling_task, return_exceptions=True)
+                self._polling_task = None
             self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
             self._worker = None
@@ -106,6 +123,24 @@ class ForwarderFeature:
             )
 
     async def stop(self) -> None:
+        polling_task, self._polling_task = self._polling_task, None
+        if polling_task is not None:
+            if self._poller is not None:
+                self._poller.request_stop()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(polling_task),
+                    timeout=self._stop_timeout,
+                )
+            except TimeoutError:
+                self._logger.error(
+                    "forwarder source poller did not stop before timeout",
+                    extra={"feature": self.name, "timeout": self._stop_timeout},
+                )
+                polling_task.cancel()
+                await asyncio.gather(polling_task, return_exceptions=True)
+            except Exception:
+                await asyncio.gather(polling_task, return_exceptions=True)
         if self._command_subscription is not None:
             self._command_subscription.unregister()
             self._command_subscription = None

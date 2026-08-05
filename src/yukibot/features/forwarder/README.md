@@ -7,6 +7,9 @@
 ## 已抽象的行为
 
 - 来源 chat/topic 到目标 chat/topic 的多路由匹配；
+- 数字 chat ID 与公开 `@username` 的配置解析；
+- 添加路由时由仓储分配 ID，相同配置幂等复用已有路由；
+- 默认自动加入源频道，或按持久游标定时拉取未加入的公开频道；
 - 不区分大小写的关键词过滤；
 - 内容类型白名单、黑名单及服务消息开关；
 - 默认 native forward 和显式 copy 模式；
@@ -33,6 +36,7 @@ Forwarder / ForwarderService
         +-- RouteRepository
         +-- MessageLinkRepository
         +-- ManagedTopicRepository
+        +-- PollCursorRepository
 ```
 
 核心模块不会创建 Telethon client、读取环境变量、注册事件 handler、处理管理员命令或决定数据库。
@@ -50,6 +54,11 @@ Forwarder / ForwarderService
 
 Telethon update 到应用事件的规范化由共享的 `adapters/telegram/event_source.py` 负责，功能专用
 gateway 不注册 handler，也不拥有 client 生命周期。
+
+`SourcePoller` 是框架接入层的另一种消息来源。它按照路由中的 `poll_interval_seconds` 拉取公开
+频道，并把结果发布成同一种 `TelegramMessageReceived`，随后仍走持久 job、相册分组、路由匹配和
+发送流程。首次配置将 `forwarder_poll_cursors` 初始化为当前最新消息 ID；每批事件成功写入 job 后
+才推进游标。轮询只发现新增消息，不提供编辑和删除同步。
 
 未显式配置 `DestinationEndpoint.topic_id` 时，`ManagedTopicService` 会先判断目标是否为论坛群。
 论坛群使用 `(source_chat_id, destination_chat_id)` 持久化自动话题；创建请求使用稳定 random ID，

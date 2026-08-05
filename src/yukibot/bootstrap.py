@@ -22,9 +22,11 @@ from yukibot.features.forwarder.infrastructure import TelethonGateway
 from yukibot.features.forwarder.job_repository import SqliteForwardJobRepository
 from yukibot.features.forwarder.management import ForwarderManagementService
 from yukibot.features.forwarder.migrations import FORWARDER_MIGRATIONS
+from yukibot.features.forwarder.poller import SourcePoller
 from yukibot.features.forwarder.repository import (
     SqliteManagedTopicRepository,
     SqliteMessageLinkRepository,
+    SqlitePollCursorRepository,
     SqliteRouteRepository,
 )
 from yukibot.features.forwarder.service import ForwarderService
@@ -93,11 +95,18 @@ def build_runtime(
         telegram_gateway,
     )
     jobs = SqliteForwardJobRepository(database)
+    poll_cursors = SqlitePollCursorRepository(database)
     service = ForwarderService(routes, links, telegram_gateway, topics=managed_topics)
-    forwarder_management = ForwarderManagementService(routes, managed_topics)
+    forwarder_management = ForwarderManagementService(
+        routes,
+        managed_topics,
+        telegram_gateway,
+        poll_cursors,
+    )
     forwarder_commands = ForwarderCommands(forwarder_management)
     processor = ForwardJobProcessor(service)
     runner = ForwardJobRunner(jobs, processor)
+    poller = SourcePoller(routes, poll_cursors, telegram_gateway, bus)
     forwarder_feature = ForwarderFeature(
         bus,
         runner,
@@ -106,6 +115,7 @@ def build_runtime(
         command_handler=forwarder_commands.handle,
         album_delay=settings.forwarder_album_delay,
         stop_timeout=settings.shutdown_timeout,
+        poller=poller,
     )
     modules = ModuleController((forwarder_feature,), management_repository)
     management_service = ManagementService(management_repository, modules, identity)

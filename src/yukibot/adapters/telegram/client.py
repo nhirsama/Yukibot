@@ -91,6 +91,20 @@ class NativeClient(Protocol):
         self, chat: object, message_ids: list[int]
     ) -> Awaitable[Sequence[NativeMessage]]: ...
 
+    async def resolve_peer(self, reference: int | str) -> NativePeer: ...
+
+    async def join_channel(self, peer: NativePeer) -> NativePeer: ...
+
+    async def get_latest_message_id(self, chat: object) -> int: ...
+
+    async def get_messages_after(
+        self,
+        chat: object,
+        after_message_id: int,
+        *,
+        limit: int,
+    ) -> Sequence[NativeMessage]: ...
+
     async def forward_messages(
         self,
         target: object,
@@ -348,6 +362,60 @@ class TelethonClientAdapter:
         return tuple(
             _StableMessage(message, chat=chat) for message in messages if message is not None
         )
+
+    async def resolve_peer(self, reference: int | str) -> NativePeer:
+        peer = await self._client.get_entity(reference)
+        if peer is None:
+            raise RuntimeError(f"Telegram did not resolve chat {reference!r}")
+        return cast(NativePeer, peer)
+
+    async def join_channel(self, peer: NativePeer) -> NativePeer:
+        peer_type = type(peer).__name__
+        if peer_type in {"Chat", "Group"}:
+            return peer
+        if peer_type != "Channel":
+            raise ValueError("automatic joining is only supported for channels and supergroups")
+        if not bool(getattr(peer, "left", False)):
+            return peer
+        functions = cast(Any, import_module("telethon.tl.functions.channels"))
+        try:
+            await self._client(
+                functions.JoinChannelRequest(channel=await self._client.get_input_entity(peer))
+            )
+        except Exception as error:
+            if type(error).__name__ != "UserAlreadyParticipantError":
+                raise
+        joined = await self._client.get_entity(peer)
+        if joined is None or bool(getattr(joined, "left", False)):
+            raise RuntimeError("Telegram did not confirm channel membership")
+        return cast(NativePeer, joined)
+
+    async def get_latest_message_id(self, chat: object) -> int:
+        messages = await self._client.get_messages(chat, limit=1)
+        if not messages or messages[0] is None:
+            return 0
+        return int(messages[0].id)
+
+    async def get_messages_after(
+        self,
+        chat: object,
+        after_message_id: int,
+        *,
+        limit: int,
+    ) -> Sequence[NativeMessage]:
+        if after_message_id < 0:
+            raise ValueError("after_message_id must not be negative")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        messages = []
+        async for message in self._client.iter_messages(
+            chat,
+            min_id=after_message_id,
+            reverse=True,
+            limit=limit,
+        ):
+            messages.append(_StableMessage(message, chat=chat))
+        return tuple(messages)
 
     async def forward_messages(
         self,

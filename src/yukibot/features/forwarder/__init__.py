@@ -17,9 +17,11 @@ from .forwarder import Forwarder
 from .memory import (
     InMemoryManagedTopicRepository,
     InMemoryMessageLinkRepository,
+    InMemoryPollCursorRepository,
     InMemoryRouteRepository,
 )
 from .models import (
+    ChatIdentity,
     ContentType,
     DestinationEndpoint,
     ForwardMode,
@@ -29,13 +31,22 @@ from .models import (
     MessageLink,
     MessageRef,
     MessagesDeleted,
+    PollCursor,
     Route,
+    RouteDraft,
     ServiceKind,
     ServiceMessage,
     SourceEndpoint,
     normalize_general_topic,
 )
-from .ports import ManagedTopicRepository, MessageLinkRepository, RouteRepository, TelegramGateway
+from .ports import (
+    ManagedTopicRepository,
+    MessageLinkRepository,
+    PollCursorRepository,
+    RouteRepository,
+    TelegramGateway,
+    TelegramSourceGateway,
+)
 from .routing import assert_acyclic_routes
 from .service import (
     DeliveryFailure,
@@ -52,6 +63,7 @@ from .topics import ManagedTopicService
 
 __all__ = [
     "AlbumBuffer",
+    "ChatIdentity",
     "ContentType",
     "DeliveryFailure",
     "DeliveryOutcome",
@@ -65,6 +77,7 @@ __all__ = [
     "ForwardingReport",
     "InMemoryManagedTopicRepository",
     "InMemoryMessageLinkRepository",
+    "InMemoryPollCursorRepository",
     "InMemoryRouteRepository",
     "IncomingMessage",
     "ManagedTopic",
@@ -80,9 +93,12 @@ __all__ = [
     "NativeForwardUnsupported",
     "PartialDeliveryState",
     "PermanentDeliveryError",
+    "PollCursor",
+    "PollCursorRepository",
     "RetryAfter",
     "Route",
     "RouteCycleError",
+    "RouteDraft",
     "RouteNotFoundError",
     "RouteRepository",
     "ServiceKind",
@@ -92,6 +108,7 @@ __all__ = [
     "SyncOperation",
     "SyncReport",
     "TelegramGateway",
+    "TelegramSourceGateway",
     "assert_acyclic_routes",
     "format_service_message",
     "normalize_general_topic",

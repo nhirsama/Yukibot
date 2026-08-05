@@ -270,6 +270,7 @@ Telethon gateway 通过 Python 的结构化类型同时满足多个功能的小�
 ```python
 class RouteRepository(Protocol):
     async def matching(self, chat_id: int, topic_id: int | None) -> list[Route]: ...
+    async def add_auto(self, draft: RouteDraft) -> Route: ...
     async def add(self, route: Route) -> Route: ...
     async def remove(self, route_id: int) -> None: ...
 ```
@@ -285,6 +286,7 @@ class RouteRepository(Protocol):
 Forwarder 负责：
 
 - 管理来源到目标的路由；
+- 解析数字 chat ID 或公开用户名，默认加入源频道或按配置轮询公开频道；
 - 根据话题、关键词和媒体类型过滤消息；
 - 原生转发或复制消息；
 - 默认使用原生转发，受保护内容或不支持的操作回退为复制；
@@ -300,11 +302,14 @@ Forwarder 负责：
 
 ```text
 Route
-- id
+- id（仓储自动分配）
 - source_chat_id
 - source_topic_id
+- source_username
+- poll_interval_seconds: null | >= 60
 - destination_chat_id
 - destination_topic_id
+- destination_username
 - mode: forward | copy
 - filters
 - enabled
@@ -322,6 +327,10 @@ ManagedTopic
 - topic_id
 - title
 
+PollCursor
+- source_chat_id
+- last_message_id
+
 ForwardJob
 - id
 - kind: receive | edit | delete
@@ -333,6 +342,11 @@ ForwardJob
 - available_at
 - last_error
 ```
+
+用户名只用于配置、展示和恢复未加入公开频道的访问实体；消息匹配、路由图、任务去重和数据库关联
+始终使用解析后的稳定 chat ID。实时路由在配置时幂等加入源频道。轮询路由不加入源频道，首次配置
+从当前最新消息开始，此后按持久游标分页拉取新增消息并发布为标准 `TelegramMessageReceived`。
+游标只在事件持久化后推进，重放由 `forwarder_jobs.deduplication_key` 吸收。轮询不负责编辑和删除同步。
 
 建议约束：
 

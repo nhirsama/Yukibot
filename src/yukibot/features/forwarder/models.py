@@ -25,6 +25,7 @@ from yukibot.contracts import (
 )
 
 __all__ = [
+    "ChatIdentity",
     "ContentType",
     "DestinationEndpoint",
     "ForwardMode",
@@ -34,7 +35,9 @@ __all__ = [
     "MessageLink",
     "MessageRef",
     "MessagesDeleted",
+    "PollCursor",
     "Route",
+    "RouteDraft",
     "ServiceKind",
     "ServiceMessage",
     "SourceEndpoint",
@@ -45,6 +48,18 @@ __all__ = [
 class ForwardMode(StrEnum):
     COPY = "copy"
     FORWARD = "forward"
+
+
+@dataclass(frozen=True, slots=True)
+class ChatIdentity:
+    """A Telegram chat resolved from either a numeric ID or public username."""
+
+    chat_id: int
+    username: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_chat_id(self.chat_id)
+        object.__setattr__(self, "username", _normalize_username(self.username))
 
 
 def normalize_general_topic(topic_id: int | None) -> int:
@@ -63,16 +78,34 @@ def _validate_topic_id(topic_id: int | None) -> None:
         raise ValueError("topic_id must not be negative")
 
 
+def _normalize_username(username: str | None) -> str | None:
+    if username is None:
+        return None
+    normalized = username.strip().removeprefix("@").strip()
+    if not normalized or any(character.isspace() for character in normalized):
+        raise ValueError("Telegram username must not be empty or contain whitespace")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class SourceEndpoint:
     """A source chat and an optional topic filter; None means every topic."""
 
     chat_id: int
     topic_id: int | None = None
+    username: str | None = None
+    poll_interval_seconds: int | None = None
 
     def __post_init__(self) -> None:
         _validate_chat_id(self.chat_id)
         _validate_topic_id(self.topic_id)
+        object.__setattr__(self, "username", _normalize_username(self.username))
+        if self.poll_interval_seconds is not None and self.poll_interval_seconds < 60:
+            raise ValueError("poll interval must be at least 60 seconds")
+
+    @property
+    def is_polled(self) -> bool:
+        return self.poll_interval_seconds is not None
 
     def matches(self, chat_id: int, topic_id: int | None) -> bool:
         if self.chat_id != chat_id:
@@ -88,10 +121,25 @@ class DestinationEndpoint:
 
     chat_id: int
     topic_id: int | None = None
+    username: str | None = None
 
     def __post_init__(self) -> None:
         _validate_chat_id(self.chat_id)
         _validate_topic_id(self.topic_id)
+        object.__setattr__(self, "username", _normalize_username(self.username))
+
+
+@dataclass(frozen=True, slots=True)
+class PollCursor:
+    """Highest source message ID durably handed to the forwarding queue."""
+
+    source_chat_id: int
+    last_message_id: int
+
+    def __post_init__(self) -> None:
+        _validate_chat_id(self.source_chat_id)
+        if self.last_message_id < 0:
+            raise ValueError("last_message_id must not be negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +221,38 @@ class Route:
             self.enabled
             and self.source.matches(messages[0].ref.chat_id, messages[0].topic_id)
             and self.message_filter.allows_album(messages)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RouteDraft:
+    """A route configuration whose persistent ID has not been allocated yet."""
+
+    source: SourceEndpoint
+    destination: DestinationEndpoint
+    mode: ForwardMode = ForwardMode.FORWARD
+    message_filter: MessageFilter = field(default_factory=MessageFilter)
+    enabled: bool = True
+    fallback_to_copy: bool = True
+
+    def bind(self, route_id: int) -> Route:
+        return Route(
+            route_id,
+            self.source,
+            self.destination,
+            mode=self.mode,
+            message_filter=self.message_filter,
+            enabled=self.enabled,
+            fallback_to_copy=self.fallback_to_copy,
+        )
+
+    def matches(self, route: Route) -> bool:
+        return (
+            self.source == route.source
+            and self.destination == route.destination
+            and self.mode is route.mode
+            and self.message_filter == route.message_filter
+            and self.fallback_to_copy == route.fallback_to_copy
         )
 
 

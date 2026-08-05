@@ -7,13 +7,17 @@ from typing import Protocol
 
 from .jobs import ForwardJob, PendingForwardJob
 from .models import (
+    ChatIdentity,
     DestinationEndpoint,
     ForwardMode,
     IncomingMessage,
     ManagedTopic,
     MessageLink,
     MessageRef,
+    PollCursor,
     Route,
+    RouteDraft,
+    SourceEndpoint,
 )
 
 
@@ -23,6 +27,8 @@ class RouteRepository(Protocol):
     async def list_all(self) -> Sequence[Route]: ...
 
     async def add(self, route: Route) -> None: ...
+
+    async def add_auto(self, draft: RouteDraft) -> Route: ...
 
     async def replace(self, route: Route) -> None: ...
 
@@ -45,6 +51,12 @@ class ManagedTopicRepository(Protocol):
     async def get(self, source_chat_id: int, destination_chat_id: int) -> ManagedTopic | None: ...
 
     async def save(self, topic: ManagedTopic) -> None: ...
+
+
+class PollCursorRepository(Protocol):
+    async def get(self, source_chat_id: int) -> PollCursor | None: ...
+
+    async def save(self, cursor: PollCursor) -> None: ...
 
 
 class ForwardJobRepository(Protocol):
@@ -117,3 +129,21 @@ class TelegramGateway(Protocol):
     async def edit_from_source(self, source: IncomingMessage, target: MessageRef) -> None: ...
 
     async def delete_message(self, target: MessageRef) -> None: ...
+
+
+class TelegramSourceGateway(Protocol):
+    def chat_title(self, chat_id: int) -> str: ...
+
+    async def resolve_chat(self, reference: str) -> ChatIdentity: ...
+
+    async def ensure_source(self, source: SourceEndpoint, *, join: bool) -> None: ...
+
+    async def latest_message_id(self, source: SourceEndpoint) -> int: ...
+
+    async def fetch_messages_after(
+        self,
+        source: SourceEndpoint,
+        after_message_id: int,
+        *,
+        limit: int,
+    ) -> Sequence[IncomingMessage]: ...
