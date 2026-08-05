@@ -168,11 +168,14 @@ class TelethonEventSource:
         task = self._track_current_task()
         try:
             event = cast(NativeDeletedEvent, raw_event)
+            message_ids = tuple(event.message_ids)
+            if not message_ids:
+                return None
             chat_id = event.chat_id
             if chat_id is None and event.channel_id is not None:
                 chat_id = _channel_dialog_id(event.channel_id)
             await self._bus.publish(
-                TelegramMessagesDeleted(tuple(event.message_ids), self._now(), chat_id=chat_id)
+                TelegramMessagesDeleted(message_ids, self._now(), chat_id=chat_id)
             )
         finally:
             self._release_task(task)

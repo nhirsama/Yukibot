@@ -7,11 +7,13 @@ import telethon
 from telethon import TelegramClient, events
 from telethon.tl import types
 from telethon.tl.custom.message import Message
-from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest
 from telethon.tl.functions.messages import (
+    CheckChatInviteRequest,
     CreateForumTopicRequest,
     EditForumTopicRequest,
     ForwardMessagesRequest,
+    ImportChatInviteRequest,
 )
 
 from yukibot.adapters.telegram import (
@@ -192,6 +194,54 @@ async def test_stable_adapter_resolves_joins_and_reads_public_channel_history() 
     assert isinstance(raw.requests[0], JoinChannelRequest)
     assert raw.requests[0].channel == "input-source"
     assert raw.iteration == (joined, {"min_id": 80, "reverse": True, "limit": 25})
+
+
+async def test_stable_adapter_reads_existing_invite_and_imports_it() -> None:
+    channel_type = type("Channel", (), {})
+    channel = channel_type()
+    channel.id = 1001
+    joined = channel_type()
+    joined.id = 2001
+
+    class RawInviteClient:
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def get_input_entity(self, peer):  # type: ignore[no-untyped-def]
+            return "input-channel"
+
+        async def __call__(self, request):  # type: ignore[no-untyped-def]
+            self.requests.append(request)
+            if isinstance(request, GetFullChannelRequest):
+                return SimpleNamespace(
+                    full_chat=SimpleNamespace(
+                        exported_invite=SimpleNamespace(
+                            link="https://t.me/+existing_hash",
+                            revoked=False,
+                        )
+                    )
+                )
+            if isinstance(request, ImportChatInviteRequest):
+                return SimpleNamespace(chats=(joined,))
+            if isinstance(request, CheckChatInviteRequest):
+                return (
+                    types.ChatInvitePeek(joined, expires=None)
+                    if request.hash == "peek_hash"
+                    else types.ChatInviteAlready(joined)
+                )
+            raise AssertionError("unexpected request")
+
+    raw = RawInviteClient()
+    client = TelethonClientAdapter(raw)
+
+    assert await client.get_invite_link(channel) == "https://t.me/+existing_hash"
+    assert await client.check_chat_invite("existing_hash") is joined
+    assert await client.check_chat_invite("peek_hash") is None
+    assert await client.join_chat_invite("existing_hash") == (joined,)
+    assert isinstance(raw.requests[0], GetFullChannelRequest)
+    assert isinstance(raw.requests[1], CheckChatInviteRequest)
+    assert isinstance(raw.requests[2], CheckChatInviteRequest)
+    assert isinstance(raw.requests[3], ImportChatInviteRequest)
 
 
 def test_v2_alpha_session_is_migrated_without_losing_authorization(tmp_path: Path) -> None:

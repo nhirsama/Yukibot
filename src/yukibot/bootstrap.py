@@ -23,7 +23,9 @@ from yukibot.features.forwarder.job_repository import SqliteForwardJobRepository
 from yukibot.features.forwarder.management import ForwarderManagementService
 from yukibot.features.forwarder.migrations import FORWARDER_MIGRATIONS
 from yukibot.features.forwarder.poller import SourcePoller
+from yukibot.features.forwarder.recovery import MembershipRebuilder, MembershipRecoveryService
 from yukibot.features.forwarder.repository import (
+    SqliteChatAccessRepository,
     SqliteManagedTopicRepository,
     SqliteMessageLinkRepository,
     SqlitePollCursorRepository,
@@ -89,6 +91,7 @@ def build_runtime(
     management_repository = SqliteManagementRepository(database)
     telegram_gateway = TelethonGateway(client, peers, request_limiter=request_limiter)
     routes = SqliteRouteRepository(database)
+    chat_accesses = SqliteChatAccessRepository(database)
     links = SqliteMessageLinkRepository(database)
     managed_topics = ManagedTopicService(
         SqliteManagedTopicRepository(database),
@@ -102,8 +105,15 @@ def build_runtime(
         managed_topics,
         telegram_gateway,
         poll_cursors,
+        chat_accesses,
     )
-    forwarder_commands = ForwarderCommands(forwarder_management)
+    rebuilder = MembershipRebuilder(
+        telegram_gateway,
+        min_interval=settings.rebuild_join_min_interval,
+        max_interval=settings.rebuild_join_max_interval,
+    )
+    recovery = MembershipRecoveryService(routes, chat_accesses, telegram_gateway, rebuilder)
+    forwarder_commands = ForwarderCommands(forwarder_management, recovery)
     processor = ForwardJobProcessor(service)
     runner = ForwardJobRunner(jobs, processor)
     poller = SourcePoller(routes, poll_cursors, telegram_gateway, bus)
@@ -116,6 +126,7 @@ def build_runtime(
         album_delay=settings.forwarder_album_delay,
         stop_timeout=settings.shutdown_timeout,
         poller=poller,
+        rebuilder=rebuilder,
     )
     modules = ModuleController((forwarder_feature,), management_repository)
     management_service = ManagementService(management_repository, modules, identity)

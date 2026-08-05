@@ -47,8 +47,9 @@ uv run yukibot
 /admin module disable forwarder
 ```
 
-只有当前登录账号发出的命令可以增删管理员。额外管理员使用稳定的 Telegram user ID 存储在
-SQLite 中，可以执行其他已注册命令。管理模块本身始终保持可用，不属于可关闭模块。
+当前登录账号和已登记管理员都可以执行全部管理及功能命令，包括增删其他委派管理员。当前登录
+账号本身不能从管理员体系中删除。额外管理员使用稳定的 Telegram user ID 存储在 SQLite 中。
+管理模块本身始终保持可用，不属于可关闭模块。
 
 Forwarder 提供：
 
@@ -60,17 +61,27 @@ Forwarder 提供：
 /route enable <id>
 /route disable <id>
 /route remove <id>
+/route check
+/route rebuild
+/route rebuild --all
+/route rebuild status
+/route rebuild cancel
 ```
 
 例如：
 
 ```text
 /route add @source_channel -1009876543210
+/route add https://t.me/+source_hash https://t.me/+destination_hash
 ```
 
-`source` 和 `destination` 都可以使用数字 ID 或 `@username`。Yukibot 会在配置时解析用户名，并同时
-保存稳定 ID 和公开用户名；路由列表优先显示用户名。默认实时模式会幂等地加入尚未加入的源频道。
-目标群不会自动加入，账号必须已经在目标群中并拥有发消息所需的权限。
+`source` 和 `destination` 都可以使用数字 ID、`@username`、公开链接
+`https://t.me/<username>`，以及私有邀请链接 `https://t.me/+<hash>`、
+`https://t.me/joinchat/<hash>` 或 `tg://join?invite=<hash>`。使用私有邀请链接时，Yukibot 会先检查
+当前账号是否已经加入；未加入时会通过该链接加入，再将稳定 ID 写入路由。需要管理员审批的群组会
+提示先等待审批，通过后重新执行命令。成功创建或更新路由后，使用过的邀请链接会保存为换号重建的
+兜底信息；路由列表优先显示用户名。默认实时模式也会幂等地加入尚未加入的公开源频道。通过数字 ID、
+用户名或公开链接配置目标群时，账号仍须已经加入目标群并拥有发消息所需的权限。
 
 路由默认使用 Telegram 原生转发；来源禁止转发或当前操作无法原生转发时自动回退为复制。目标是
 论坛超级群且没有指定 `destination_topic` 时，Yukibot 会创建一个与源频道同名的话题并保存映射；
@@ -91,7 +102,8 @@ Forwarder 提供：
 ```
 
 间隔支持分钟、小时和天，例如 `5m`、`2h`、`1d`；不带单位的数字按分钟处理。轮询模式不会自动
-加入源频道，只适用于当前账号可以公开读取的频道。首次配置会把游标定位到频道当前最新消息，
+加入源频道，只适用于当前账号可以公开读取的频道，因此轮询源不能使用私有邀请链接。首次配置会把
+游标定位到频道当前最新消息，
 只转发之后出现的新消息，不回灌已有历史。游标在消息进入持久任务队列后推进并保存到 SQLite，
 重启后继续拉取。轮询模式不接收 Telegram 实时更新，因此不会同步已拉取消息之后发生的编辑和删除。
 
@@ -100,6 +112,19 @@ Forwarder 提供：
 
 动态转发路由保存在 `forwarder_routes` 表中。`add` 由数据库自动分配路由 ID，重复添加相同配置
 返回已有路由，不产生重复转发；`enable`、`disable` 和 `remove` 是幂等的，修改使用 `set <id>`。
+
+切换 Telegram 账号前，建议先执行 `/route check`。该命令会检查路由涉及的频道和群组，并更新
+数据库中的频道名称、公开 `https://t.me/<username>` 链接，以及当前账号能够读取到的已有私有邀请
+链接。它只读取现有链接，不会创建新邀请；如果当前无法读到新链接，配置路由时记录的私有邀请链接
+会继续保留。切换 session 并使用新账号登录后，再执行
+`/route rebuild`；程序会跳过已加入聊天和轮询源，只重建启用路由需要的实时源与目标。
+`/route rebuild --all` 还会包含停用路由。
+
+加群操作严格串行，默认每次尝试随机间隔 5 至 10 分钟。缺少用户名或邀请链接的频道不会进入
+队列，而会直接出现在命令回复中。重建进度仅保存在当前进程内，不写入数据库；进程重启后需要
+重新执行命令。间隔可通过 `YUKIBOT_REBUILD_JOIN_MIN_INTERVAL` 和
+`YUKIBOT_REBUILD_JOIN_MAX_INTERVAL` 调整，其中最小值不能低于 300 秒。
+当前登录账号和数据库中的委派管理员都可以执行这些命令。
 
 Forwarder handler 只将事件幂等写入 `forwarder_jobs`，由单个受监管 worker 按任务顺序发送。
 进程中断时，处于 `processing` 的任务会在下次启动恢复为 `pending`。严格 exactly-once 仍受

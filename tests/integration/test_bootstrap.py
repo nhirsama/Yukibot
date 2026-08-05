@@ -283,9 +283,46 @@ async def test_runtime_control_plane_manages_modules_admins_and_routes(
     )
     assert client.calls[-1][2] == "1: peer (-1001) -> peer (-2001) (forward, enabled)"
 
+    await client.handlers[NewEvent](  # type: ignore[operator]
+        FakeMessage(
+            8,
+            chat,
+            text="/route check",
+            sender=owner,
+            outgoing=True,
+        )
+    )
+    assert "频道检查完成" in str(client.calls[-1][2])
+    assert "已加入 2" in str(client.calls[-1][2])
+
+    await client.handlers[NewEvent](  # type: ignore[operator]
+        FakeMessage(
+            9,
+            chat,
+            text="/route check",
+            sender=FakePeer(123, "delegated admin"),
+            outgoing=False,
+        )
+    )
+    assert "频道检查完成" in str(client.calls[-1][2])
+    assert "已加入 2" in str(client.calls[-1][2])
+
+    await client.handlers[NewEvent](  # type: ignore[operator]
+        FakeMessage(
+            10,
+            chat,
+            text="/route rebuild",
+            sender=owner,
+            outgoing=True,
+        )
+    )
+    assert client.calls[-1][2] == (
+        "没有可自动重建的未加入频道。\n使用 /route rebuild status 查看进度。"
+    )
+
     calls_before_unknown = len(client.calls)
     await client.handlers[NewEvent](  # type: ignore[operator]
-        FakeMessage(8, chat, text="/unknown value", sender=owner, outgoing=True)
+        FakeMessage(11, chat, text="/unknown value", sender=owner, outgoing=True)
     )
     assert len(client.calls) == calls_before_unknown
     assert ordinary_messages[-1].message.text == "/unknown value"

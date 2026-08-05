@@ -15,6 +15,7 @@ from .errors import (
 )
 from .forwarder import Forwarder
 from .memory import (
+    InMemoryChatAccessRepository,
     InMemoryManagedTopicRepository,
     InMemoryMessageLinkRepository,
     InMemoryPollCursorRepository,
@@ -40,12 +41,25 @@ from .models import (
     normalize_general_topic,
 )
 from .ports import (
+    ChatAccessRepository,
     ManagedTopicRepository,
     MessageLinkRepository,
     PollCursorRepository,
     RouteRepository,
     TelegramGateway,
+    TelegramRecoveryGateway,
     TelegramSourceGateway,
+)
+from .recovery import (
+    ChatAccess,
+    ChatInspection,
+    MembershipItem,
+    MembershipRebuilder,
+    MembershipRecoveryService,
+    MembershipReport,
+    MembershipState,
+    RebuildJoinResult,
+    RebuildProgress,
 )
 from .routing import assert_acyclic_routes
 from .service import (
@@ -63,7 +77,10 @@ from .topics import ManagedTopicService
 
 __all__ = [
     "AlbumBuffer",
+    "ChatAccess",
+    "ChatAccessRepository",
     "ChatIdentity",
+    "ChatInspection",
     "ContentType",
     "DeliveryFailure",
     "DeliveryOutcome",
@@ -75,6 +92,7 @@ __all__ = [
     "ForwarderOptions",
     "ForwarderService",
     "ForwardingReport",
+    "InMemoryChatAccessRepository",
     "InMemoryManagedTopicRepository",
     "InMemoryMessageLinkRepository",
     "InMemoryPollCursorRepository",
@@ -83,6 +101,11 @@ __all__ = [
     "ManagedTopic",
     "ManagedTopicRepository",
     "ManagedTopicService",
+    "MembershipItem",
+    "MembershipRebuilder",
+    "MembershipRecoveryService",
+    "MembershipReport",
+    "MembershipState",
     "MessageFilter",
     "MessageLink",
     "MessageLinkRepository",
@@ -95,6 +118,8 @@ __all__ = [
     "PermanentDeliveryError",
     "PollCursor",
     "PollCursorRepository",
+    "RebuildJoinResult",
+    "RebuildProgress",
     "RetryAfter",
     "Route",
     "RouteCycleError",
@@ -108,6 +133,7 @@ __all__ = [
     "SyncOperation",
     "SyncReport",
     "TelegramGateway",
+    "TelegramRecoveryGateway",
     "TelegramSourceGateway",
     "assert_acyclic_routes",
     "format_service_message",

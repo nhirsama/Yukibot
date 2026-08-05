@@ -23,6 +23,7 @@ from yukibot.kernel import (
 
 from .jobs import ForwardJobEvent, pending_jobs_for_event
 from .poller import SourcePoller
+from .recovery import MembershipRebuilder
 from .worker import ForwardJobRunner
 
 
@@ -42,6 +43,7 @@ class ForwarderFeature:
         clock: Callable[[], float] = time.time,
         logger: logging.Logger | None = None,
         poller: SourcePoller | None = None,
+        rebuilder: MembershipRebuilder | None = None,
     ) -> None:
         if album_delay < 0:
             raise ValueError("album_delay must not be negative")
@@ -63,6 +65,8 @@ class ForwarderFeature:
         self._logger = logger or logging.getLogger(__name__)
         self._poller = poller
         self._polling_task: asyncio.Task[None] | None = None
+        self._rebuilder = rebuilder
+        self._rebuild_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self._worker is not None:
@@ -97,6 +101,12 @@ class ForwarderFeature:
                     name="forwarder:source-poller",
                     critical=True,
                 )
+            if self._rebuilder is not None:
+                self._rebuilder.prepare()
+                self._rebuild_task = self._supervisor.create_task(
+                    self._rebuilder.run(),
+                    name="forwarder:membership-rebuilder",
+                )
         except BaseException:
             if self._command_subscription is not None:
                 self._command_subscription.unregister()
@@ -111,6 +121,12 @@ class ForwarderFeature:
                 self._polling_task.cancel()
                 await asyncio.gather(self._polling_task, return_exceptions=True)
                 self._polling_task = None
+            if self._rebuilder is not None:
+                self._rebuilder.request_stop()
+            if self._rebuild_task is not None:
+                self._rebuild_task.cancel()
+                await asyncio.gather(self._rebuild_task, return_exceptions=True)
+                self._rebuild_task = None
             self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
             self._worker = None
@@ -123,6 +139,12 @@ class ForwarderFeature:
             )
 
     async def stop(self) -> None:
+        rebuild_task, self._rebuild_task = self._rebuild_task, None
+        if rebuild_task is not None:
+            if self._rebuilder is not None:
+                self._rebuilder.request_stop()
+            rebuild_task.cancel()
+            await asyncio.gather(rebuild_task, return_exceptions=True)
         polling_task, self._polling_task = self._polling_task, None
         if polling_task is not None:
             if self._poller is not None:

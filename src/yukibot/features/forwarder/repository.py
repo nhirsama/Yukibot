@@ -20,6 +20,7 @@ from .models import (
     RouteDraft,
     SourceEndpoint,
 )
+from .recovery import ChatAccess
 from .routing import assert_acyclic_routes
 
 _ROUTE_COLUMNS = """
@@ -59,6 +60,7 @@ class SqliteRouteRepository:
                 """,
                 _route_parameters(route),
             )
+            await _ensure_route_access(transaction, route)
 
     async def add_auto(self, draft: RouteDraft) -> Route:
         async with self._database.transaction() as transaction:
@@ -77,13 +79,16 @@ class SqliteRouteRepository:
             )
             if result.last_row_id is None or result.last_row_id <= 0:
                 raise RuntimeError("database did not allocate a forwarding route ID")
-            return draft.bind(result.last_row_id)
+            route = draft.bind(result.last_row_id)
+            await _ensure_route_access(transaction, route)
+            return route
 
     async def replace(self, route: Route) -> None:
         async with self._database.transaction() as transaction:
             routes = await _list_routes(transaction)
             if not any(item.id == route.id for item in routes):
                 raise KeyError(route.id)
+            existing = next(item for item in routes if item.id == route.id)
             proposed = tuple(route if item.id == route.id else item for item in routes)
             assert_acyclic_routes(proposed)
             await transaction.execute(
@@ -97,12 +102,39 @@ class SqliteRouteRepository:
                 """,
                 (*_route_parameters(route)[1:], route.id),
             )
+            await _ensure_route_access(transaction, route)
+            await _remove_unreferenced_access(
+                transaction,
+                {
+                    existing.source.chat_id,
+                    existing.destination.chat_id,
+                }
+                - {route.source.chat_id, route.destination.chat_id},
+            )
 
     async def remove(self, route_id: int) -> bool:
-        result = await self._database.execute(
-            "DELETE FROM forwarder_routes WHERE id = ?", (route_id,)
-        )
-        return result.row_count > 0
+        async with self._database.transaction() as transaction:
+            row = await transaction.fetch_one(
+                """
+                SELECT source_chat_id, destination_chat_id
+                FROM forwarder_routes
+                WHERE id = ?
+                """,
+                (route_id,),
+            )
+            if row is None:
+                return False
+            result = await transaction.execute(
+                "DELETE FROM forwarder_routes WHERE id = ?", (route_id,)
+            )
+            await _remove_unreferenced_access(
+                transaction,
+                {
+                    _int_column(row, "source_chat_id"),
+                    _int_column(row, "destination_chat_id"),
+                },
+            )
+            return result.row_count > 0
 
 
 class SqliteMessageLinkRepository:
@@ -252,9 +284,80 @@ class SqlitePollCursorRepository:
         )
 
 
+class SqliteChatAccessRepository:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    async def get_many(self, chat_ids: Sequence[int]) -> Sequence[ChatAccess]:
+        if not chat_ids:
+            return ()
+        placeholders = ", ".join("?" for _ in chat_ids)
+        rows = await self._database.fetch_all(
+            f"""
+            SELECT chat_id, title, username, invite_link
+            FROM forwarder_chat_access
+            WHERE chat_id IN ({placeholders})
+            ORDER BY chat_id
+            """,
+            tuple(chat_ids),
+        )
+        return tuple(_chat_access_from_row(row) for row in rows)
+
+    async def save(self, access: ChatAccess) -> None:
+        await self._database.execute(
+            """
+            INSERT INTO forwarder_chat_access (chat_id, title, username, invite_link)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (chat_id) DO UPDATE SET
+                title = coalesce(excluded.title, title),
+                username = excluded.username,
+                invite_link = excluded.invite_link,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (access.chat_id, access.title, access.username, access.invite_link),
+        )
+
+
 async def _list_routes(connection: DatabaseConnection) -> tuple[Route, ...]:
     rows = await connection.fetch_all(f"SELECT {_ROUTE_COLUMNS} FROM forwarder_routes ORDER BY id")
     return tuple(_route_from_row(row) for row in rows)
+
+
+async def _ensure_route_access(connection: DatabaseConnection, route: Route) -> None:
+    for chat_id, username in (
+        (route.source.chat_id, route.source.username),
+        (route.destination.chat_id, route.destination.username),
+    ):
+        await connection.execute(
+            """
+            INSERT INTO forwarder_chat_access (chat_id, username, invite_link)
+            VALUES (?, ?, ?)
+            ON CONFLICT (chat_id) DO NOTHING
+            """,
+            (
+                chat_id,
+                username,
+                f"https://t.me/{username}" if username is not None else None,
+            ),
+        )
+
+
+async def _remove_unreferenced_access(
+    connection: DatabaseConnection,
+    chat_ids: set[int],
+) -> None:
+    for chat_id in chat_ids:
+        await connection.execute(
+            """
+            DELETE FROM forwarder_chat_access
+            WHERE chat_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM forwarder_routes
+                  WHERE source_chat_id = ? OR destination_chat_id = ?
+              )
+            """,
+            (chat_id, chat_id, chat_id),
+        )
 
 
 def _route_parameters(route: Route) -> tuple[str | int | None, ...]:
@@ -335,6 +438,15 @@ def _managed_topic_from_row(row: Row) -> ManagedTopic:
         destination_chat_id=_int_column(row, "destination_chat_id"),
         topic_id=_int_column(row, "topic_id"),
         title=_str_column(row, "title"),
+    )
+
+
+def _chat_access_from_row(row: Row) -> ChatAccess:
+    return ChatAccess(
+        chat_id=_int_column(row, "chat_id"),
+        title=_optional_str_column(row, "title"),
+        username=_optional_str_column(row, "username"),
+        invite_link=_optional_str_column(row, "invite_link"),
     )
 
 

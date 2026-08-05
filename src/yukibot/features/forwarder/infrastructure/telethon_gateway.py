@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from io import BytesIO
 from typing import cast
+from urllib.parse import parse_qs, urlparse
 
 from yukibot.adapters.telegram.client import (
     NativeClient,
@@ -33,6 +34,7 @@ from ..models import (
     MessageRef,
     SourceEndpoint,
 )
+from ..recovery import ChatAccess, ChatInspection, RebuildJoinResult
 
 
 class TelethonGateway:
@@ -57,14 +59,37 @@ class TelethonGateway:
         )
 
     async def resolve_chat(self, reference: str) -> ChatIdentity:
+        normalized_reference = reference.strip()
+        invite_hash = _invite_hash(normalized_reference)
+        if invite_hash is not None:
+            try:
+                peer = await self._client.check_chat_invite(invite_hash)
+                if peer is None:
+                    joined = tuple(await self._client.join_chat_invite(invite_hash))
+                    if len(joined) != 1:
+                        raise ValueError("Telegram invite did not return exactly one chat")
+                    peer = joined[0]
+                self._peers.remember(peer)
+                return ChatIdentity(
+                    peer_dialog_id(peer),
+                    _chat_username(peer),
+                    normalized_reference,
+                )
+            except Exception as error:
+                if type(error).__name__ == "InviteRequestSentError":
+                    raise PermanentDeliveryError(
+                        "入群申请已提交, 审批通过后请重新执行路由命令"
+                    ) from error
+                raise _translate_error(error) from error
+
         native_reference: int | str
         try:
-            native_reference = int(reference)
+            native_reference = int(normalized_reference)
         except ValueError:
-            username = reference.strip()
-            if not username.startswith("@") or len(username) == 1:
-                raise ValueError("频道用户名必须以 @ 开头") from None
-            native_reference = username
+            username = _public_username(normalized_reference)
+            if username is None:
+                raise ValueError("频道引用必须是 ID、@用户名或 Telegram 邀请链接") from None
+            native_reference = f"@{username}"
         try:
             peer = self._peers.get(native_reference) if isinstance(native_reference, int) else None
             if peer is None:
@@ -87,6 +112,77 @@ class TelethonGateway:
                 peer = await self._client.join_channel(peer)
                 self._peers.remember(peer)
         except Exception as error:
+            raise _translate_error(error) from error
+
+    async def inspect_chats(self, chat_ids: Sequence[int]) -> Sequence[ChatInspection]:
+        try:
+            dialogs = await self._client.get_dialogs()
+        except Exception as error:
+            raise _translate_error(error) from error
+        joined: dict[int, NativePeer] = {}
+        for dialog in dialogs:
+            peer = dialog.chat
+            chat_id = peer_dialog_id(peer)
+            joined[chat_id] = peer
+            self._peers.remember(peer)
+
+        inspections: list[ChatInspection] = []
+        for chat_id in chat_ids:
+            inspected_peer = joined.get(chat_id)
+            if inspected_peer is None:
+                inspections.append(ChatInspection(ChatAccess(chat_id), False))
+                continue
+            username = _chat_username(inspected_peer)
+            invite_link = f"https://t.me/{username}" if username is not None else None
+            metadata_error: str | None = None
+            if chat_id < 0 and username is None:
+                try:
+                    async with self._request_limiter.slot(chat_id):
+                        invite_link = await self._client.get_invite_link(inspected_peer)
+                except Exception as error:
+                    metadata_error = type(error).__name__
+            inspections.append(
+                ChatInspection(
+                    ChatAccess(
+                        chat_id,
+                        title=_chat_title(inspected_peer),
+                        username=username,
+                        invite_link=invite_link,
+                    ),
+                    True,
+                    metadata_error,
+                )
+            )
+        return tuple(inspections)
+
+    async def join_chat(self, access: ChatAccess) -> RebuildJoinResult:
+        try:
+            dialogs = await self._client.get_dialogs()
+            for dialog in dialogs:
+                peer = dialog.chat
+                self._peers.remember(peer)
+                if peer_dialog_id(peer) == access.chat_id:
+                    return RebuildJoinResult.ALREADY_JOINED
+
+            if access.username is not None:
+                peer = await self._client.resolve_peer(f"@{access.username}")
+                _require_expected_chat(peer, access.chat_id)
+                peer = await self._client.join_channel(peer)
+                self._peers.remember(peer)
+                return RebuildJoinResult.JOINED
+
+            invite_hash = _invite_hash(access.invite_link)
+            if invite_hash is None:
+                raise ValueError(f"chat {access.chat_id} has no usable join reference")
+            joined = tuple(await self._client.join_chat_invite(invite_hash))
+            for peer in joined:
+                self._peers.remember(peer)
+                if peer_dialog_id(peer) == access.chat_id:
+                    return RebuildJoinResult.JOINED
+            raise ValueError(f"Telegram invite did not resolve to expected chat {access.chat_id}")
+        except Exception as error:
+            if type(error).__name__ == "InviteRequestSentError":
+                return RebuildJoinResult.APPROVAL_PENDING
             raise _translate_error(error) from error
 
     async def latest_message_id(self, source: SourceEndpoint) -> int:
@@ -122,17 +218,7 @@ class TelethonGateway:
 
     def chat_title(self, chat_id: int) -> str | None:
         peer = self._peers.get(chat_id)
-        if peer is None:
-            return None
-        title = getattr(peer, "title", None) or getattr(peer, "name", None)
-        if isinstance(title, str) and title.strip():
-            return title
-        parts = (
-            value
-            for value in (getattr(peer, "first_name", None), getattr(peer, "last_name", None))
-            if isinstance(value, str) and value.strip()
-        )
-        return " ".join(parts) or None
+        return _chat_title(peer) if peer is not None else None
 
     def is_forum(self, chat_id: int) -> bool:
         peer = self._peers.get(chat_id)
@@ -396,6 +482,73 @@ def _effective_reply(
     destination: DestinationEndpoint, reply_to_message_id: int | None
 ) -> int | None:
     return reply_to_message_id if reply_to_message_id is not None else destination.topic_id
+
+
+def _chat_title(peer: NativePeer) -> str | None:
+    title = getattr(peer, "title", None) or getattr(peer, "name", None)
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    parts = (
+        value.strip()
+        for value in (getattr(peer, "first_name", None), getattr(peer, "last_name", None))
+        if isinstance(value, str) and value.strip()
+    )
+    return " ".join(parts) or None
+
+
+def _chat_username(peer: NativePeer) -> str | None:
+    username = getattr(peer, "username", None)
+    if isinstance(username, str) and username.strip():
+        return username.strip().removeprefix("@")
+    for item in getattr(peer, "usernames", ()) or ():
+        value = getattr(item, "username", None)
+        if bool(getattr(item, "active", True)) and isinstance(value, str) and value.strip():
+            return value.strip().removeprefix("@")
+    return None
+
+
+def _require_expected_chat(peer: NativePeer, expected_chat_id: int) -> None:
+    actual = peer_dialog_id(peer)
+    if actual != expected_chat_id:
+        raise ValueError(f"join reference resolves to chat {actual}, expected {expected_chat_id}")
+
+
+def _invite_hash(link: str | None) -> str | None:
+    if link is None:
+        return None
+    parsed = urlparse(link.strip())
+    if parsed.scheme == "tg" and parsed.netloc == "join":
+        values = parse_qs(parsed.query).get("invite", ())
+        return values[0] if values and values[0] else None
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() not in {
+        "t.me",
+        "telegram.me",
+        "www.t.me",
+        "www.telegram.me",
+    }:
+        return None
+    path = parsed.path.strip("/")
+    if path.startswith("+") and len(path) > 1:
+        return path[1:]
+    prefix = "joinchat/"
+    return path[len(prefix) :] if path.startswith(prefix) and len(path) > len(prefix) else None
+
+
+def _public_username(reference: str) -> str | None:
+    if reference.startswith("@") and len(reference) > 1:
+        return reference[1:]
+    parsed = urlparse(reference)
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() not in {
+        "t.me",
+        "telegram.me",
+        "www.t.me",
+        "www.telegram.me",
+    }:
+        return None
+    path = parsed.path.strip("/")
+    if not path or "/" in path or path.startswith("+") or path.startswith("joinchat"):
+        return None
+    return path
 
 
 def _message_ref(message: NativeMessage) -> MessageRef:

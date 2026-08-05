@@ -67,9 +67,12 @@ async def test_current_account_can_delegate_admin_by_stable_user_id(tmp_path: Pa
         await service.add_admin(owner_command, 123)
 
         assert await service.is_authorized(delegated_command)
+        await service.add_admin(delegated_command, 456)
+        assert await service.list_admins() == (999, (123, 456))
+        await service.remove_admin(delegated_command, 456)
         assert await service.list_admins() == (999, (123,))
-        with pytest.raises(PermissionError, match="current Telegram account"):
-            await service.add_admin(delegated_command, 456)
+        with pytest.raises(ValueError, match="cannot be removed"):
+            await service.remove_admin(delegated_command, 999)
         with pytest.raises(ValueError, match="positive"):
             await service.remove_admin(owner_command, -1)
     finally:

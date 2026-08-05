@@ -95,6 +95,12 @@ class NativeClient(Protocol):
 
     async def join_channel(self, peer: NativePeer) -> NativePeer: ...
 
+    async def get_invite_link(self, peer: NativePeer) -> str | None: ...
+
+    async def check_chat_invite(self, invite_hash: str) -> NativePeer | None: ...
+
+    async def join_chat_invite(self, invite_hash: str) -> Sequence[NativePeer]: ...
+
     async def get_latest_message_id(self, chat: object) -> int: ...
 
     async def get_messages_after(
@@ -389,6 +395,43 @@ class TelethonClientAdapter:
         if joined is None or bool(getattr(joined, "left", False)):
             raise RuntimeError("Telegram did not confirm channel membership")
         return cast(NativePeer, joined)
+
+    async def get_invite_link(self, peer: NativePeer) -> str | None:
+        peer_type = type(peer).__name__
+        if peer_type == "Channel":
+            functions = cast(Any, import_module("telethon.tl.functions.channels"))
+            details = await self._client(
+                functions.GetFullChannelRequest(channel=await self._client.get_input_entity(peer))
+            )
+        elif peer_type == "Chat":
+            functions = cast(Any, import_module("telethon.tl.functions.messages"))
+            details = await self._client(functions.GetFullChatRequest(chat_id=int(peer.id)))
+        else:
+            return None
+        exported = getattr(details.full_chat, "exported_invite", None)
+        if exported is None or bool(getattr(exported, "revoked", False)):
+            return None
+        link = getattr(exported, "link", None)
+        return link if isinstance(link, str) and link.strip() else None
+
+    async def join_chat_invite(self, invite_hash: str) -> Sequence[NativePeer]:
+        if not invite_hash:
+            raise ValueError("Telegram invite hash must not be empty")
+        functions = cast(Any, import_module("telethon.tl.functions.messages"))
+        updates = await self._client(functions.ImportChatInviteRequest(hash=invite_hash))
+        chats = getattr(updates, "chats", ())
+        return tuple(cast(NativePeer, chat) for chat in chats)
+
+    async def check_chat_invite(self, invite_hash: str) -> NativePeer | None:
+        if not invite_hash:
+            raise ValueError("Telegram invite hash must not be empty")
+        functions = cast(Any, import_module("telethon.tl.functions.messages"))
+        result = await self._client(functions.CheckChatInviteRequest(hash=invite_hash))
+        types = cast(Any, import_module("telethon.tl.types"))
+        if not isinstance(result, types.ChatInviteAlready):
+            return None
+        chat = getattr(result, "chat", None)
+        return cast(NativePeer, chat) if chat is not None else None
 
     async def get_latest_message_id(self, chat: object) -> int:
         messages = await self._client.get_messages(chat, limit=1)

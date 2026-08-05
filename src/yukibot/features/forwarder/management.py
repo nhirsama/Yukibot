@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from .errors import RouteNotFoundError
 from .models import ChatIdentity, PollCursor, Route, RouteDraft
 from .ports import PollCursorRepository, RouteRepository, TelegramSourceGateway
+from .recovery import ChatAccess, ChatAccessStore
 from .topics import ManagedTopicService
 
 
@@ -17,6 +18,7 @@ class ForwarderManagementService:
     topics: ManagedTopicService | None = None
     sources: TelegramSourceGateway | None = None
     poll_cursors: PollCursorRepository | None = None
+    chat_accesses: ChatAccessStore | None = None
     _add_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     async def resolve_chat(self, reference: str) -> ChatIdentity:
@@ -29,6 +31,26 @@ class ForwarderManagementService:
 
     async def list_routes(self) -> tuple[Route, ...]:
         return tuple(await self.routes.list_all())
+
+    async def remember_chat_accesses(self, identities: tuple[ChatIdentity, ...]) -> None:
+        if self.chat_accesses is None:
+            return
+        for identity in identities:
+            public_link = (
+                f"https://t.me/{identity.username}" if identity.username is not None else None
+            )
+            await self.chat_accesses.save(
+                ChatAccess(
+                    identity.chat_id,
+                    title=(
+                        self.sources.chat_title(identity.chat_id)
+                        if self.sources is not None
+                        else None
+                    ),
+                    username=identity.username,
+                    invite_link=identity.invite_link or public_link,
+                )
+            )
 
     def route_titles(self, route: Route) -> tuple[str | None, str | None]:
         if self.sources is None:

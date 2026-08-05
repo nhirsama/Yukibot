@@ -52,14 +52,18 @@ class ForwardMode(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ChatIdentity:
-    """A Telegram chat resolved from either a numeric ID or public username."""
+    """A Telegram chat resolved from an ID, username or invite link."""
 
     chat_id: int
     username: str | None = None
+    invite_link: str | None = None
 
     def __post_init__(self) -> None:
         _validate_chat_id(self.chat_id)
         object.__setattr__(self, "username", _normalize_username(self.username))
+        if self.invite_link is not None:
+            normalized = self.invite_link.strip()
+            object.__setattr__(self, "invite_link", normalized or None)
 
 
 def normalize_general_topic(topic_id: int | None) -> int:

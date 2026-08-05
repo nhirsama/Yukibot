@@ -9,7 +9,21 @@ from yukibot.kernel import CommandResult, ControlCommand
 
 from .errors import ForwarderError, RouteNotFoundError
 from .management import ForwarderManagementService
-from .models import DestinationEndpoint, ForwardMode, Route, RouteDraft, SourceEndpoint
+from .models import (
+    ChatIdentity,
+    DestinationEndpoint,
+    ForwardMode,
+    Route,
+    RouteDraft,
+    SourceEndpoint,
+)
+from .recovery import (
+    MembershipItem,
+    MembershipRecoveryService,
+    MembershipReport,
+    MembershipState,
+    RebuildProgress,
+)
 
 ROUTE_HELP = """转发路由命令:
 /route list - 列出全部路由
@@ -19,18 +33,29 @@ ROUTE_HELP = """转发路由命令:
 /route enable <id> - 启用路由
 /route disable <id> - 停用路由
 /route remove <id> - 删除路由
-source/destination 可使用数字 ID 或 @username
+/route check - 刷新频道名称、链接并检查当前账号加入状态
+/route rebuild - 按启用路由重建当前账号的频道和群组
+/route rebuild --all - 同时包含已停用路由
+/route rebuild status - 查看当前重建进度
+/route rebuild cancel - 取消当前重建
+source/destination 可使用数字 ID、@username、公开链接或私有邀请链接
 选项: [forward|copy] [source_topic|-] [destination_topic|-] [--poll <间隔>]
 默认自动加入源频道并实时接收; --poll 5m 表示不自动加入, 每 5 分钟拉取一次。
-轮询从配置后的新消息开始且不跟踪编辑/删除; 目标群必须已加入。
+私有邀请链接会先加入对应聊天; 其他方式配置的目标群必须已加入。
+轮询从配置后的新消息开始且不跟踪编辑/删除。
 默认使用 forward; 目标为论坛且 destination_topic 为 - 时, 自动创建与源频道同名的话题。"""
 
 _POLL_DURATION = re.compile(r"^(?P<amount>[1-9][0-9]*)(?P<unit>[mhd]?)$")
 
 
 class ForwarderCommands:
-    def __init__(self, service: ForwarderManagementService) -> None:
+    def __init__(
+        self,
+        service: ForwarderManagementService,
+        recovery: MembershipRecoveryService | None = None,
+    ) -> None:
         self._service = service
+        self._recovery = recovery
 
     async def handle(self, command: ControlCommand) -> CommandResult:
         try:
@@ -53,14 +78,16 @@ class ForwarderCommands:
                 route = await self._service.get_route(int(arguments[1]))
                 return CommandResult(_route_details(route, *self._service.route_titles(route)))
             if arguments[0] == "add" and len(arguments) >= 3:
-                draft = await _parse_route_draft(arguments[1:], self._service)
+                draft, identities = await _parse_route_draft(arguments[1:], self._service)
                 route = await self._service.add_generated_route(draft)
+                await self._service.remember_chat_accesses(identities)
                 return CommandResult(f"Route {route.id} is configured.")
             if arguments[0] == "set" and len(arguments) >= 4:
                 route_id = int(arguments[1])
-                draft = await _parse_route_draft(arguments[2:], self._service)
+                draft, identities = await _parse_route_draft(arguments[2:], self._service)
                 route = draft.bind(route_id)
                 await self._service.replace_route(route)
+                await self._service.remember_chat_accesses(identities)
                 return CommandResult(f"Route {route.id} is updated.")
             if len(arguments) == 2 and arguments[0] in {"enable", "disable"}:
                 enabled = arguments[0] == "enable"
@@ -71,6 +98,19 @@ class ForwarderCommands:
                 route_id = int(arguments[1])
                 await self._service.remove_route(route_id)
                 return CommandResult(f"Route {route_id} is removed.")
+            if arguments == ["check"] and self._recovery is not None:
+                return CommandResult(_membership_report(await self._recovery.check()))
+            if arguments and arguments[0] == "rebuild" and self._recovery is not None:
+                if arguments == ["rebuild", "status"]:
+                    return CommandResult(_rebuild_progress(self._recovery.progress()))
+                if arguments == ["rebuild", "cancel"]:
+                    cancelled = self._recovery.cancel()
+                    return CommandResult("当前重建已取消。" if cancelled else "当前没有重建任务。")
+                if arguments in (["rebuild"], ["rebuild", "--all"]):
+                    report = await self._recovery.rebuild(
+                        include_disabled=arguments == ["rebuild", "--all"]
+                    )
+                    return CommandResult(_rebuild_started(report))
         except (ForwarderError, ValueError, RouteNotFoundError) as error:
             return CommandResult(error.args[0] if error.args else str(error))
         return CommandResult(ROUTE_HELP)
@@ -79,28 +119,33 @@ class ForwarderCommands:
 async def _parse_route_draft(
     arguments: list[str],
     service: ForwarderManagementService,
-) -> RouteDraft:
+) -> tuple[RouteDraft, tuple[ChatIdentity, ChatIdentity]]:
     positional, poll_interval = _extract_poll_option(arguments)
     if not 2 <= len(positional) <= 5:
         raise ValueError("路由参数数量不正确")
-    source = await service.resolve_chat(positional[0])
-    destination = await service.resolve_chat(positional[1])
     mode = ForwardMode(positional[2]) if len(positional) >= 3 else ForwardMode.FORWARD
     source_topic = _topic_id(positional[3]) if len(positional) >= 4 else None
     destination_topic = _topic_id(positional[4]) if len(positional) >= 5 else None
-    return RouteDraft(
-        SourceEndpoint(
-            source.chat_id,
-            source_topic,
-            username=source.username,
-            poll_interval_seconds=poll_interval,
+    if poll_interval is not None and _is_private_invite(positional[0]):
+        raise ValueError("轮询源不能使用私有邀请链接, 请改用实时模式")
+    source = await service.resolve_chat(positional[0])
+    destination = await service.resolve_chat(positional[1])
+    return (
+        RouteDraft(
+            SourceEndpoint(
+                source.chat_id,
+                source_topic,
+                username=source.username,
+                poll_interval_seconds=poll_interval,
+            ),
+            DestinationEndpoint(
+                destination.chat_id,
+                destination_topic,
+                username=destination.username,
+            ),
+            mode=mode,
         ),
-        DestinationEndpoint(
-            destination.chat_id,
-            destination_topic,
-            username=destination.username,
-        ),
-        mode=mode,
+        (source, destination),
     )
 
 
@@ -136,6 +181,16 @@ def _poll_seconds(value: str) -> int:
     amount = int(match.group("amount"))
     multiplier = {"": 60, "m": 60, "h": 3600, "d": 86400}[match.group("unit")]
     return amount * multiplier
+
+
+def _is_private_invite(reference: str) -> bool:
+    normalized = reference.strip().casefold()
+    return (
+        "t.me/+" in normalized
+        or "telegram.me/+" in normalized
+        or "/joinchat/" in normalized
+        or normalized.startswith("tg://join?")
+    )
 
 
 def _topic_id(value: str) -> int | None:
@@ -213,3 +268,85 @@ def _format_duration(seconds: int) -> str:
     if seconds % 3600 == 0:
         return f"{seconds // 3600}h"
     return f"{seconds // 60}m"
+
+
+def _membership_report(report: MembershipReport) -> str:
+    lines = [
+        "频道检查完成: "
+        f"已加入 {report.count(MembershipState.JOINED)}, "
+        f"未加入 {report.count(MembershipState.MISSING)}, "
+        f"无法自动重建 {report.count(MembershipState.UNAVAILABLE)}, "
+        f"无需加入 {report.count(MembershipState.NOT_REQUIRED)}, "
+        f"资料更新 {report.updated}。"
+    ]
+    lines.extend(_membership_line(item) for item in report.items)
+    return _bounded_output(lines)
+
+
+def _rebuild_started(report: MembershipReport) -> str:
+    pending = tuple(item for item in report.items if item.state is MembershipState.MISSING)
+    unavailable = tuple(item for item in report.items if item.state is MembershipState.UNAVAILABLE)
+    lines = [
+        f"重建任务已启动, 共 {len(pending)} 个待加入频道; 每次尝试间隔不低于 5 分钟并带随机波动。"
+        if pending
+        else "没有可自动重建的未加入频道。"
+    ]
+    if unavailable:
+        lines.append("以下频道缺少用户名或可用邀请链接, 请人工处理:")
+        lines.extend(_membership_line(item, include_state=False) for item in unavailable)
+    lines.append("使用 /route rebuild status 查看进度。")
+    return _bounded_output(lines)
+
+
+def _membership_line(item: MembershipItem, *, include_state: bool = True) -> str:
+    labels = {
+        MembershipState.JOINED: "已加入",
+        MembershipState.MISSING: "未加入",
+        MembershipState.UNAVAILABLE: "无法自动重建",
+        MembershipState.NOT_REQUIRED: "无需加入",
+    }
+    access = item.access
+    title = access.title or access.username or str(access.chat_id)
+    link = access.join_reference or "无公开链接"
+    routes = ",".join(str(route_id) for route_id in item.route_ids)
+    roles = ",".join(item.roles)
+    prefix = f"[{labels[item.state]}] " if include_state else "- "
+    suffix = f"; 元数据读取失败={item.metadata_error}" if item.metadata_error else ""
+    return (
+        f"{prefix}{title} | id={access.chat_id} | link={link} | "
+        f"roles={roles} | routes={routes}{suffix}"
+    )
+
+
+def _rebuild_progress(progress: RebuildProgress) -> str:
+    state = (
+        "运行中"
+        if progress.active
+        else "已完成"
+        if progress.total > 0 and progress.completed == progress.total
+        else "未运行"
+    )
+    lines = [
+        f"重建状态: {state}; 总数 {progress.total}; 完成 {progress.completed}; "
+        f"新加入 {progress.joined}; 已加入 {progress.already_joined}; "
+        f"等待审批 {progress.approval_pending}; 失败 {progress.failed}。"
+    ]
+    if progress.current_chat_id is not None:
+        lines.append(f"当前频道: {progress.current_chat_id}")
+    if progress.next_attempt_at is not None:
+        lines.append(f"下次尝试时间戳: {progress.next_attempt_at:.0f}")
+    lines.extend(f"失败 {chat_id}: {error}" for chat_id, error in progress.failures)
+    return _bounded_output(lines)
+
+
+def _bounded_output(lines: list[str], *, limit: int = 3900) -> str:
+    output: list[str] = []
+    length = 0
+    for line in lines:
+        added = len(line) + (1 if output else 0)
+        if length + added > limit:
+            output.append("其余结果因消息长度限制省略。")
+            break
+        output.append(line)
+        length += added
+    return "\n".join(output)

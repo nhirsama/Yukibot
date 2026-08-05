@@ -27,6 +27,7 @@ def test_settings_parse_prefixed_environment(monkeypatch: pytest.MonkeyPatch) ->
         ("database_url", "postgresql://localhost/test", "only sqlite"),
         ("log_level", "verbose", "unknown log level"),
         ("forwarder_album_delay", -1, "greater than or equal to 0"),
+        ("rebuild_join_min_interval", 299, "greater than or equal to 300"),
     ],
 )
 def test_invalid_settings_are_rejected(field: str, value: object, error: str) -> None:
@@ -43,3 +44,13 @@ def test_settings_are_immutable() -> None:
     settings = Settings(telegram_api_id=1, telegram_api_hash="hash")
     with pytest.raises(ValidationError, match="frozen"):
         settings.log_level = "DEBUG"  # type: ignore[misc]
+
+
+def test_rebuild_join_intervals_must_be_ordered() -> None:
+    with pytest.raises(ValidationError, match="must be ordered"):
+        Settings(
+            telegram_api_id=1,
+            telegram_api_hash="hash",
+            rebuild_join_min_interval=601,
+            rebuild_join_max_interval=600,
+        )

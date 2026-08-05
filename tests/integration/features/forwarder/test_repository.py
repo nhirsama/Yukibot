@@ -4,6 +4,7 @@ import pytest
 
 from yukibot.adapters.database import MigrationRunner, SqliteDatabase
 from yukibot.features.forwarder import (
+    ChatAccess,
     ContentType,
     DestinationEndpoint,
     ForwardMode,
@@ -19,6 +20,7 @@ from yukibot.features.forwarder import (
 )
 from yukibot.features.forwarder.migrations import FORWARDER_MIGRATIONS
 from yukibot.features.forwarder.repository import (
+    SqliteChatAccessRepository,
     SqliteManagedTopicRepository,
     SqliteMessageLinkRepository,
     SqlitePollCursorRepository,
@@ -80,6 +82,7 @@ async def test_route_repository_round_trip_and_management(tmp_path: Path) -> Non
 
         assert await routes.remove(1)
         assert not await routes.remove(1)
+        assert await SqliteChatAccessRepository(database).get_many((-1001, -2000)) == ()
     finally:
         await database.close()
 
@@ -175,6 +178,33 @@ async def test_poll_cursor_only_moves_forward_and_survives_restart(tmp_path: Pat
         await reopened.close()
 
 
+async def test_chat_access_metadata_is_upserted_and_survives_restart(tmp_path: Path) -> None:
+    path = tmp_path / "chat-access.db"
+    database, _, _ = await open_repositories(path)
+    accesses = SqliteChatAccessRepository(database)
+    try:
+        await accesses.save(
+            ChatAccess(-1001, "Old title", "public_name", "https://t.me/public_name")
+        )
+        await accesses.save(
+            ChatAccess(-1001, "Private title", invite_link="https://t.me/+private_hash")
+        )
+        assert await accesses.get_many((-1001,)) == (
+            ChatAccess(-1001, "Private title", invite_link="https://t.me/+private_hash"),
+        )
+    finally:
+        await database.close()
+
+    reopened = SqliteDatabase(database_url(path))
+    await reopened.open()
+    try:
+        assert (await SqliteChatAccessRepository(reopened).get_many((-1001,)))[0].title == (
+            "Private title"
+        )
+    finally:
+        await reopened.close()
+
+
 async def test_v3_database_upgrades_without_changing_existing_routes(tmp_path: Path) -> None:
     path = tmp_path / "upgrade-v3.db"
     database = SqliteDatabase(database_url(path))
@@ -207,5 +237,7 @@ async def test_v3_database_upgrades_without_changing_existing_routes(tmp_path: P
             1, MessageRef(-1001, 10)
         ) == MessageLink(1, MessageRef(-1001, 10), MessageRef(-2001, 20), ForwardMode.COPY)
         assert await SqlitePollCursorRepository(database).get(-1001) is None
+        access = await SqliteChatAccessRepository(database).get_many((-1001, -2001))
+        assert access == (ChatAccess(-2001), ChatAccess(-1001))
     finally:
         await database.close()

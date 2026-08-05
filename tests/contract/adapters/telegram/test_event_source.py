@@ -177,11 +177,15 @@ async def test_event_source_lifecycle_and_event_publication(monkeypatch) -> None
 
     message = FakeMessage(1, FakePeer(-100123), sender=FakePeer(42))
     await client.handlers[NewEvent](message)  # type: ignore[operator]
+    empty_deletion = SimpleNamespace(message_ids=(), channel_id=123, chat_id=None)
+    await client.handlers[DeleteEvent](empty_deletion)  # type: ignore[operator]
     deletion = SimpleNamespace(message_ids=(1, 2), channel_id=123, chat_id=None)
     await client.handlers[DeleteEvent](deletion)  # type: ignore[operator]
 
     assert received[0].message.ref.chat_id == -100123
     assert peers.get(-100123) is not None
+    assert len(deleted) == 1
+    assert deleted[0].message_ids == (1, 2)
     assert deleted[0].chat_id == -1_000_000_000_123
 
     await source.stop()

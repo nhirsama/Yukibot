@@ -128,6 +128,41 @@ FORWARDER_MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        scope="forwarder",
+        version=6,
+        description="store recoverable chat metadata",
+        statements=(
+            """
+            CREATE TABLE forwarder_chat_access (
+                chat_id INTEGER PRIMARY KEY,
+                title TEXT,
+                username TEXT,
+                invite_link TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            INSERT INTO forwarder_chat_access (chat_id, username, invite_link)
+            SELECT source_chat_id, max(source_username),
+                   CASE WHEN max(source_username) IS NULL THEN NULL
+                        ELSE 'https://t.me/' || max(source_username) END
+            FROM forwarder_routes
+            GROUP BY source_chat_id
+            """,
+            """
+            INSERT INTO forwarder_chat_access (chat_id, username, invite_link)
+            SELECT destination_chat_id, max(destination_username),
+                   CASE WHEN max(destination_username) IS NULL THEN NULL
+                        ELSE 'https://t.me/' || max(destination_username) END
+            FROM forwarder_routes
+            GROUP BY destination_chat_id
+            ON CONFLICT (chat_id) DO UPDATE SET
+                username = coalesce(username, excluded.username),
+                invite_link = coalesce(invite_link, excluded.invite_link)
+            """,
+        ),
+    ),
 )
 
 __all__ = ["FORWARDER_MIGRATIONS"]

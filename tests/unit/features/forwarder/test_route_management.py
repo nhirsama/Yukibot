@@ -4,9 +4,11 @@ import pytest
 from conftest import FakeTelegramGateway
 
 from yukibot.features.forwarder import (
+    ChatAccess,
     ChatIdentity,
     DestinationEndpoint,
     ForwardMode,
+    InMemoryChatAccessRepository,
     InMemoryManagedTopicRepository,
     InMemoryPollCursorRepository,
     ManagedTopicService,
@@ -59,12 +61,14 @@ class FakeSources:
             "@target": ChatIdentity(-2001, "target"),
         }
         self.prepared: list[tuple[SourceEndpoint, bool]] = []
+        self.resolutions: list[str] = []
         self.latest = 42
 
     def chat_title(self, chat_id: int) -> str:
         return {-1001: "Source channel", -2001: "Target group"}.get(chat_id, str(chat_id))
 
     async def resolve_chat(self, reference: str) -> ChatIdentity:
+        self.resolutions.append(reference)
         return self.identities[reference]
 
     async def ensure_source(self, source: SourceEndpoint, *, join: bool) -> None:
@@ -110,6 +114,55 @@ async def test_username_route_auto_joins_source_and_persists_canonical_ids() -> 
     assert route.source == SourceEndpoint(-1001, username="source")
     assert route.destination == DestinationEndpoint(-2001, username="target")
     assert sources.prepared == [(route.source, True)]
+
+
+async def test_invite_link_route_persists_stable_ids_and_join_references() -> None:
+    routes = MemoryRoutes()
+    sources = FakeSources()
+    source_link = "https://t.me/+source_hash"
+    target_link = "https://t.me/joinchat/target_hash"
+    sources.identities.update(
+        {
+            source_link: ChatIdentity(-1001, invite_link=source_link),
+            target_link: ChatIdentity(-2001, invite_link=target_link),
+        }
+    )
+    accesses = InMemoryChatAccessRepository()
+    service = ForwarderManagementService(routes, sources=sources, chat_accesses=accesses)
+    commands = ForwarderCommands(service)
+
+    result = await commands.handle(
+        ControlCommand("/route", f"add {source_link} {target_link}", -9, 1, 42, True)
+    )
+
+    assert result.text == "Route 1 is configured."
+    assert routes.routes[1].source == SourceEndpoint(-1001)
+    assert routes.routes[1].destination == DestinationEndpoint(-2001)
+    assert await accesses.get_many((-1001, -2001)) == (
+        ChatAccess(-2001, "Target group", invite_link=target_link),
+        ChatAccess(-1001, "Source channel", invite_link=source_link),
+    )
+
+
+async def test_poll_mode_rejects_private_source_invite_before_resolving_chats() -> None:
+    routes = MemoryRoutes()
+    sources = FakeSources()
+    commands = ForwarderCommands(ForwarderManagementService(routes, sources=sources))
+
+    result = await commands.handle(
+        ControlCommand(
+            "/route",
+            "add https://t.me/+source_hash @target --poll 5m",
+            -9,
+            1,
+            42,
+            True,
+        )
+    )
+
+    assert result.text == "轮询源不能使用私有邀请链接, 请改用实时模式"
+    assert sources.resolutions == []
+    assert routes.routes == {}
 
 
 async def test_poll_option_does_not_join_and_initializes_cursor_at_latest_message() -> None:
@@ -181,6 +234,34 @@ async def test_set_keeps_generated_id_and_replaces_configuration() -> None:
 
     assert result.text == "Route 1 is updated."
     assert routes.routes[1].mode is ForwardMode.COPY
+
+
+async def test_set_updates_saved_invite_links() -> None:
+    routes = MemoryRoutes()
+    sources = FakeSources()
+    source_link = "https://t.me/+source_hash"
+    target_link = "https://t.me/+target_hash"
+    sources.identities.update(
+        {
+            source_link: ChatIdentity(-1001, invite_link=source_link),
+            target_link: ChatIdentity(-2001, invite_link=target_link),
+        }
+    )
+    accesses = InMemoryChatAccessRepository()
+    commands = ForwarderCommands(
+        ForwarderManagementService(routes, sources=sources, chat_accesses=accesses)
+    )
+    await commands.handle(ControlCommand("/route", "add @source @target", -9, 1, 42, True))
+
+    result = await commands.handle(
+        ControlCommand("/route", f"set 1 {source_link} {target_link}", -9, 2, 42, True)
+    )
+
+    assert result.text == "Route 1 is updated."
+    assert await accesses.get_many((-1001, -2001)) == (
+        ChatAccess(-2001, "Target group", invite_link=target_link),
+        ChatAccess(-1001, "Source channel", invite_link=source_link),
+    )
 
 
 async def test_adding_route_prepares_automatic_forum_topic_immediately() -> None:

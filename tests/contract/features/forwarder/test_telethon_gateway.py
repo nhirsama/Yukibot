@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from tests.contract.adapters.telegram.conftest import (
+    FakeDialog,
     FakeMessage,
     FakeNativeClient,
     FakePeer,
@@ -22,11 +23,13 @@ from yukibot.features.forwarder import (
     IncomingMessage,
     MessageRef,
     NativeForwardUnsupported,
+    PermanentDeliveryError,
     RetryAfter,
     SourceEndpoint,
     TelegramGateway,
 )
 from yukibot.features.forwarder.infrastructure import TelethonGateway
+from yukibot.features.forwarder.recovery import ChatAccess, RebuildJoinResult
 
 
 def domain_message(
@@ -150,6 +153,109 @@ async def test_gateway_resolves_username_joins_and_polls_public_source() -> None
         ("join", -3001),
         ("latest", -3001),
         ("history", -3001, 10, 100),
+    ]
+
+
+async def test_gateway_resolves_public_link_and_existing_private_invite() -> None:
+    gateway, client, peers = make_gateway()
+    public = FakePeer(-3001, "Public source", username="public_source")
+    private = FakePeer(-3002, "Private source")
+    client.resolved["@public_source"] = public
+    client.invite_checks["private_hash"] = private
+
+    public_identity = await gateway.resolve_chat("https://t.me/public_source")
+    private_identity = await gateway.resolve_chat("https://t.me/+private_hash")
+
+    assert public_identity == ChatIdentity(-3001, "public_source")
+    assert private_identity == ChatIdentity(
+        -3002,
+        invite_link="https://t.me/+private_hash",
+    )
+    assert peers.get(-3002) is private
+    assert client.calls == [
+        ("resolve", "@public_source"),
+        ("check-invite", "private_hash"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "https://t.me/+private_hash",
+        "https://telegram.me/joinchat/private_hash",
+        "tg://join?invite=private_hash",
+    ),
+)
+async def test_gateway_joins_private_invite_when_not_already_a_member(reference: str) -> None:
+    gateway, client, peers = make_gateway()
+    joined = FakePeer(-3002, "Private source")
+    client.invite_joins["private_hash"] = (joined,)
+
+    identity = await gateway.resolve_chat(reference)
+
+    assert identity == ChatIdentity(-3002, invite_link=reference)
+    assert peers.get(-3002) is joined
+    assert client.calls == [
+        ("check-invite", "private_hash"),
+        ("join-invite", "private_hash"),
+    ]
+
+
+async def test_gateway_rejects_private_invite_without_exactly_one_joined_chat() -> None:
+    gateway, client, _ = make_gateway()
+    client.invite_joins["empty_hash"] = ()
+    client.invite_joins["multiple_hash"] = (FakePeer(-3001), FakePeer(-3002))
+
+    with pytest.raises(ValueError, match="exactly one chat"):
+        await gateway.resolve_chat("https://t.me/+empty_hash")
+    with pytest.raises(ValueError, match="exactly one chat"):
+        await gateway.resolve_chat("https://t.me/+multiple_hash")
+
+
+async def test_gateway_reports_pending_private_invite_approval() -> None:
+    gateway, client, _ = make_gateway()
+    approval_error = type("InviteRequestSentError", (Exception,), {})()
+    client.invite_join_errors["approval_hash"] = approval_error
+
+    with pytest.raises(PermanentDeliveryError, match="审批通过后请重新执行"):
+        await gateway.resolve_chat("https://t.me/+approval_hash")
+
+
+async def test_gateway_checks_metadata_and_rebuilds_public_and_private_chats() -> None:
+    gateway, client, peers = make_gateway()
+    public = FakePeer(-3001, "Public source", username="public_source")
+    private = FakePeer(-3002, "Private source")
+    client.dialogs.extend((FakeDialog(public), FakeDialog(private)))
+    client.invite_links[-3002] = "https://t.me/+private_hash"
+
+    inspected = await gateway.inspect_chats((-3002, -3001, -3999))
+
+    by_id = {item.access.chat_id: item for item in inspected}
+    assert by_id[-3001].joined
+    assert by_id[-3001].access.join_reference == "https://t.me/public_source"
+    assert by_id[-3002].access.title == "Private source"
+    assert by_id[-3002].access.invite_link == "https://t.me/+private_hash"
+    assert not by_id[-3999].joined
+    assert client.calls == [("invite-link", -3002)]
+
+    client.dialogs.clear()
+    public.left = True
+    client.resolved["@public_source"] = public
+    private_joined = FakePeer(-3002, "Private source")
+    client.invite_joins["private_hash"] = (private_joined,)
+    assert await gateway.join_chat(ChatAccess(-3001, username="public_source")) is (
+        RebuildJoinResult.JOINED
+    )
+    assert (
+        await gateway.join_chat(ChatAccess(-3002, invite_link="https://t.me/+private_hash"))
+        is RebuildJoinResult.JOINED
+    )
+    assert peers.get(-3001) is public
+    assert peers.get(-3002) is private_joined
+    assert client.calls[-3:] == [
+        ("resolve", "@public_source"),
+        ("join", -3001),
+        ("join-invite", "private_hash"),
     ]
 
 

@@ -27,15 +27,18 @@ class ManagementService:
         return self.owner.user_id, delegated
 
     async def add_admin(self, command: ControlCommand, user_id: int) -> None:
-        self._require_owner(command)
+        await self._require_admin(command)
         if user_id <= 0:
             raise ValueError("administrator user ID must be positive")
         if user_id == self.owner.user_id:
             return
-        await self.admins.add_admin(user_id, granted_by=self.owner.user_id)
+        granted_by = self.owner.user_id if command.outgoing else command.actor_id
+        if granted_by is None:
+            raise PermissionError("administrator permission is required")
+        await self.admins.add_admin(user_id, granted_by=granted_by)
 
     async def remove_admin(self, command: ControlCommand, user_id: int) -> None:
-        self._require_owner(command)
+        await self._require_admin(command)
         if user_id <= 0:
             raise ValueError("administrator user ID must be positive")
         if user_id == self.owner.user_id:
@@ -51,7 +54,6 @@ class ManagementService:
     async def disable_module(self, name: str) -> ModuleStatus:
         return await self.modules.disable(name)
 
-    @staticmethod
-    def _require_owner(command: ControlCommand) -> None:
-        if not command.outgoing:
-            raise PermissionError("only the current Telegram account can manage administrators")
+    async def _require_admin(self, command: ControlCommand) -> None:
+        if not await self.is_authorized(command):
+            raise PermissionError("administrator permission is required")

@@ -19,6 +19,7 @@ from .models import (
     RouteDraft,
     SourceEndpoint,
 )
+from .recovery import ChatAccess, ChatInspection, RebuildJoinResult
 
 
 class RouteRepository(Protocol):
@@ -57,6 +58,12 @@ class PollCursorRepository(Protocol):
     async def get(self, source_chat_id: int) -> PollCursor | None: ...
 
     async def save(self, cursor: PollCursor) -> None: ...
+
+
+class ChatAccessRepository(Protocol):
+    async def get_many(self, chat_ids: Sequence[int]) -> Sequence[ChatAccess]: ...
+
+    async def save(self, access: ChatAccess) -> None: ...
 
 
 class ForwardJobRepository(Protocol):
@@ -147,3 +154,9 @@ class TelegramSourceGateway(Protocol):
         *,
         limit: int,
     ) -> Sequence[IncomingMessage]: ...
+
+
+class TelegramRecoveryGateway(Protocol):
+    async def inspect_chats(self, chat_ids: Sequence[int]) -> Sequence[ChatInspection]: ...
+
+    async def join_chat(self, access: ChatAccess) -> RebuildJoinResult: ...

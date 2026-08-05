@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Iterable, Sequence
 
 from .models import ManagedTopic, MessageLink, MessageRef, PollCursor, Route, RouteDraft
+from .recovery import ChatAccess
 from .routing import assert_acyclic_routes
 
 
@@ -120,3 +121,27 @@ class InMemoryPollCursorRepository:
             existing = self._cursors.get(cursor.source_chat_id)
             if existing is None or cursor.last_message_id > existing.last_message_id:
                 self._cursors[cursor.source_chat_id] = cursor
+
+
+class InMemoryChatAccessRepository:
+    def __init__(self, items: Iterable[ChatAccess] = ()) -> None:
+        self._items = {item.chat_id: item for item in items}
+        self._lock = asyncio.Lock()
+
+    async def get_many(self, chat_ids: Sequence[int]) -> Sequence[ChatAccess]:
+        async with self._lock:
+            return tuple(
+                self._items[chat_id] for chat_id in sorted(set(chat_ids)) if chat_id in self._items
+            )
+
+    async def save(self, access: ChatAccess) -> None:
+        async with self._lock:
+            existing = self._items.get(access.chat_id)
+            if existing is not None:
+                access = ChatAccess(
+                    access.chat_id,
+                    access.title or existing.title,
+                    access.username,
+                    access.invite_link,
+                )
+            self._items[access.chat_id] = access

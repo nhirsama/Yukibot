@@ -107,6 +107,10 @@ class FakeNativeClient:
         self.error: Exception | None = None
         self.album: FakeAlbum | None = None
         self.resolved: dict[int | str, FakePeer] = {}
+        self.invite_links: dict[int, str] = {}
+        self.invite_checks: dict[str, FakePeer | None] = {}
+        self.invite_joins: dict[str, tuple[FakePeer, ...]] = {}
+        self.invite_join_errors: dict[str, Exception] = {}
 
     def add_event_handler(self, handler, event_cls):  # type: ignore[no-untyped-def]
         self.handlers[event_cls] = handler
@@ -161,6 +165,20 @@ class FakeNativeClient:
         self.calls.append(("join", int(peer.id)))
         peer.left = False
         return peer
+
+    async def get_invite_link(self, peer: FakePeer) -> str | None:
+        self.calls.append(("invite-link", int(peer.id)))
+        return self.invite_links.get(int(peer.id))
+
+    async def check_chat_invite(self, invite_hash: str) -> FakePeer | None:
+        self.calls.append(("check-invite", invite_hash))
+        return self.invite_checks.get(invite_hash)
+
+    async def join_chat_invite(self, invite_hash: str) -> tuple[FakePeer, ...]:
+        self.calls.append(("join-invite", invite_hash))
+        if error := self.invite_join_errors.get(invite_hash):
+            raise error
+        return self.invite_joins[invite_hash]
 
     async def get_latest_message_id(self, chat: FakePeer) -> int:
         self.calls.append(("latest", int(chat.id)))

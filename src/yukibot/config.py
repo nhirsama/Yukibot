@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     forwarder_album_delay: float = Field(default=0.8, ge=0, le=10)
     shutdown_timeout: float = Field(default=15.0, gt=0, le=300)
+    rebuild_join_min_interval: float = Field(default=300.0, ge=300, le=86400)
+    rebuild_join_max_interval: float = Field(default=600.0, ge=300, le=86400)
 
     @field_validator("telegram_api_hash")
     @classmethod
@@ -47,3 +49,9 @@ class Settings(BaseSettings):
         if normalized not in logging.getLevelNamesMapping():
             raise ValueError(f"unknown log level: {value}")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_rebuild_intervals(self) -> Settings:
+        if self.rebuild_join_max_interval < self.rebuild_join_min_interval:
+            raise ValueError("rebuild join intervals must be ordered")
+        return self
