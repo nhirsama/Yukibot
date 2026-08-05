@@ -13,6 +13,7 @@ from yukibot.features.forwarder import (
     InMemoryRouteRepository,
     ManagedTopicService,
     MessageRef,
+    PermanentDeliveryError,
     Route,
     ServiceKind,
     ServiceMessage,
@@ -29,7 +30,7 @@ def route(route_id: int = 1, *, topic_id: int | None = None) -> Route:
     )
 
 
-async def test_automatic_topic_is_created_once_reused_and_renamed() -> None:
+async def test_automatic_topic_is_created_once_reused_by_id_and_explicitly_renamed() -> None:
     telegram = FakeTelegramGateway()
     telegram.forum_chats.add(-2001)
     telegram.chat_titles[-1001] = "Source channel"
@@ -37,13 +38,26 @@ async def test_automatic_topic_is_created_once_reused_and_renamed() -> None:
 
     first = await topics.resolve(route(1))
     second = await topics.resolve(route(2))
-    telegram.chat_titles[-1001] = "Renamed channel"
-    renamed = await topics.resolve(route(2))
+    telegram.chat_titles[-1001] = str(-1001)
+    reused = await topics.resolve(route(2))
+    renamed = await topics.resolve(route(2), source_title="Renamed channel")
 
-    assert first == second == renamed == DestinationEndpoint(-2001, 500)
+    assert first == second == reused == renamed == DestinationEndpoint(-2001, 500)
     assert len(telegram.created_topics) == 1
     assert telegram.created_topics[0][0:2] == (-2001, "Source channel")
     assert telegram.edited_topics == [(-2001, 500, "Renamed channel")]
+
+
+async def test_automatic_topic_is_not_created_without_a_resolved_source_title() -> None:
+    telegram = FakeTelegramGateway()
+    telegram.forum_chats.add(-2001)
+    telegram.chat_titles.clear()
+    topics = ManagedTopicService(InMemoryManagedTopicRepository(), telegram)
+
+    with pytest.raises(PermanentDeliveryError, match="has no resolved title"):
+        await topics.resolve(route())
+
+    assert telegram.created_topics == []
 
 
 async def test_explicit_topic_and_non_forum_destination_are_not_automatically_managed() -> None:

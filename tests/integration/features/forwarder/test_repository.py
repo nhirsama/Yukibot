@@ -118,8 +118,8 @@ async def test_message_links_are_upserted_queried_and_cascade_deleted(tmp_path: 
     database, routes, links = await open_repositories(tmp_path / "links.db")
     await routes.add(route(1, -1001, -1002))
     source = MessageRef(-1001, 10)
-    original = MessageLink(1, source, MessageRef(-1002, 20))
-    replacement = MessageLink(1, source, MessageRef(-1002, 21))
+    original = MessageLink(1, source, MessageRef(-1002, 20), ForwardMode.COPY)
+    replacement = MessageLink(1, source, MessageRef(-1002, 21), ForwardMode.FORWARD)
     try:
         await links.save_many((original,))
         await links.save_many((replacement,))
@@ -190,10 +190,22 @@ async def test_v3_database_upgrades_without_changing_existing_routes(tmp_path: P
             """,
             (1, -1001, None, -2001, None, "forward", "{}", 1, 1),
         )
+        await database.execute(
+            """
+            INSERT INTO forwarder_message_links (
+                route_id, source_chat_id, source_message_id,
+                destination_chat_id, destination_message_id
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (1, -1001, 10, -2001, 20),
+        )
         await MigrationRunner(database, FORWARDER_MIGRATIONS).upgrade()
 
         stored = await SqliteRouteRepository(database).list_all()
         assert stored == (Route(1, SourceEndpoint(-1001), DestinationEndpoint(-2001)),)
+        assert await SqliteMessageLinkRepository(database).get(
+            1, MessageRef(-1001, 10)
+        ) == MessageLink(1, MessageRef(-1001, 10), MessageRef(-2001, 20), ForwardMode.COPY)
         assert await SqlitePollCursorRepository(database).get(-1001) is None
     finally:
         await database.close()

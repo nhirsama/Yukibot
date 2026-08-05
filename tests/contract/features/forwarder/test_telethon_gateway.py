@@ -118,10 +118,10 @@ async def test_gateway_exposes_forum_metadata_and_topic_operations() -> None:
     ]
 
 
-def test_missing_source_peer_uses_stable_topic_title_fallback() -> None:
+def test_missing_source_peer_has_no_invented_topic_title() -> None:
     gateway, _, _ = make_gateway()
 
-    assert gateway.chat_title(-3001) == "Channel -3001"
+    assert gateway.chat_title(-3001) is None
 
 
 async def test_gateway_resolves_username_joins_and_polls_public_source() -> None:

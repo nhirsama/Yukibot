@@ -116,11 +116,12 @@ class SqliteMessageLinkRepository:
             """
             INSERT INTO forwarder_message_links (
                 route_id, source_chat_id, source_message_id,
-                destination_chat_id, destination_message_id
-            ) VALUES (?, ?, ?, ?, ?)
+                destination_chat_id, destination_message_id, delivery_mode
+            ) VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT (route_id, source_chat_id, source_message_id) DO UPDATE SET
                 destination_chat_id = excluded.destination_chat_id,
-                destination_message_id = excluded.destination_message_id
+                destination_message_id = excluded.destination_message_id,
+                delivery_mode = excluded.delivery_mode
             """,
             tuple(
                 (
@@ -129,6 +130,7 @@ class SqliteMessageLinkRepository:
                     link.source.message_id,
                     link.destination.chat_id,
                     link.destination.message_id,
+                    link.delivery_mode.value,
                 )
                 for link in links
             ),
@@ -138,7 +140,7 @@ class SqliteMessageLinkRepository:
         row = await self._database.fetch_one(
             """
             SELECT route_id, source_chat_id, source_message_id,
-                   destination_chat_id, destination_message_id
+                   destination_chat_id, destination_message_id, delivery_mode
             FROM forwarder_message_links
             WHERE route_id = ? AND source_chat_id = ? AND source_message_id = ?
             """,
@@ -150,7 +152,7 @@ class SqliteMessageLinkRepository:
         rows = await self._database.fetch_all(
             """
             SELECT route_id, source_chat_id, source_message_id,
-                   destination_chat_id, destination_message_id
+                   destination_chat_id, destination_message_id, delivery_mode
             FROM forwarder_message_links
             WHERE source_chat_id = ? AND source_message_id = ?
             ORDER BY route_id
@@ -163,7 +165,7 @@ class SqliteMessageLinkRepository:
         rows = await self._database.fetch_all(
             """
             SELECT route_id, source_chat_id, source_message_id,
-                   destination_chat_id, destination_message_id
+                   destination_chat_id, destination_message_id, delivery_mode
             FROM forwarder_message_links
             WHERE source_message_id = ?
             ORDER BY route_id, source_chat_id
@@ -323,6 +325,7 @@ def _link_from_row(row: Row) -> MessageLink:
             _int_column(row, "destination_chat_id"),
             _int_column(row, "destination_message_id"),
         ),
+        delivery_mode=ForwardMode(_str_column(row, "delivery_mode")),
     )
 
 

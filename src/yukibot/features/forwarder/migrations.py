@@ -117,6 +117,17 @@ FORWARDER_MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        scope="forwarder",
+        version=5,
+        description="store actual message delivery mode",
+        statements=(
+            """
+            ALTER TABLE forwarder_message_links ADD COLUMN delivery_mode TEXT
+                NOT NULL DEFAULT 'copy' CHECK (delivery_mode IN ('copy', 'forward'))
+            """,
+        ),
+    ),
 )
 
 __all__ = ["FORWARDER_MIGRATIONS"]

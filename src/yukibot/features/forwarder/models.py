@@ -261,6 +261,7 @@ class MessageLink:
     route_id: int
     source: MessageRef
     destination: MessageRef
+    delivery_mode: ForwardMode = ForwardMode.COPY
 
     def __post_init__(self) -> None:
         if self.route_id <= 0:

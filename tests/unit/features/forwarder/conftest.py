@@ -36,8 +36,8 @@ class FakeTelegramGateway:
         self.edited_topics: list[tuple[int, int, str]] = []
         self.next_topic_id = 500
 
-    def chat_title(self, chat_id: int) -> str:
-        return self.chat_titles.get(chat_id, str(chat_id))
+    def chat_title(self, chat_id: int) -> str | None:
+        return self.chat_titles.get(chat_id)
 
     def is_forum(self, chat_id: int) -> bool:
         return chat_id in self.forum_chats

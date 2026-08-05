@@ -83,15 +83,32 @@ async def test_native_forward_can_fall_back_to_copy() -> None:
     )
     telegram = FakeTelegramGateway()
     telegram.reject_native_forward = True
-    service = ForwarderService(
-        InMemoryRouteRepository([route]), InMemoryMessageLinkRepository(), telegram
-    )
+    links = InMemoryMessageLinkRepository()
+    service = ForwarderService(InMemoryRouteRepository([route]), links, telegram)
 
     report = await service.forward_message(make_message(10))
 
     assert [call.mode for call in telegram.calls] == [ForwardMode.FORWARD, ForwardMode.COPY]
     assert report.outcomes[0].mode_used is ForwardMode.COPY
+    stored = await links.get(1, MessageRef(-1001, 10))
+    assert stored is not None
+    assert stored.delivery_mode is ForwardMode.COPY
     assert not report.failures
+
+
+async def test_native_forward_edit_is_skipped_without_editing_destination() -> None:
+    route = Route(1, SourceEndpoint(-1001), DestinationEndpoint(-2001))
+    links = InMemoryMessageLinkRepository()
+    telegram = FakeTelegramGateway()
+    service = ForwarderService(InMemoryRouteRepository([route]), links, telegram)
+    message = make_message(10)
+
+    await service.forward_message(message)
+    report = await service.synchronize_edit(make_message(10, text="edited"))
+
+    assert report.synchronized == 1
+    assert report.failures == ()
+    assert telegram.edits == []
 
 
 async def test_concurrent_duplicate_message_is_delivered_once() -> None:
@@ -133,6 +150,25 @@ async def test_album_is_sorted_and_each_item_is_mapped() -> None:
     assert len(telegram.calls) == 1
     assert replay.delivered_messages == 0
     assert replay.deduplicated_messages == 3
+
+
+async def test_album_copy_fallback_mode_is_persisted_for_replay() -> None:
+    route = Route(1, SourceEndpoint(-1001), DestinationEndpoint(-2001))
+    links = InMemoryMessageLinkRepository()
+    telegram = FakeTelegramGateway()
+    telegram.reject_native_forward = True
+    service = ForwarderService(InMemoryRouteRepository([route]), links, telegram)
+    album = (
+        make_message(10, grouped_id=50, content_type=ContentType.PHOTO),
+        make_message(11, grouped_id=50, content_type=ContentType.PHOTO),
+    )
+
+    delivered = await service.forward_album(album)
+    replay = await service.forward_album(album)
+
+    assert delivered.outcomes[0].mode_used is ForwardMode.COPY
+    assert replay.outcomes[0].mode_used is ForwardMode.COPY
+    assert replay.deduplicated_messages == 2
 
 
 async def test_partial_album_mapping_is_not_resent() -> None:

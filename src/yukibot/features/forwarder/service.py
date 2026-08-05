@@ -129,7 +129,7 @@ class ForwarderService:
                                 route.id,
                                 (message.ref,),
                                 (existing.destination,),
-                                route.mode,
+                                existing.delivery_mode,
                                 deduplicated=True,
                             )
                         )
@@ -140,7 +140,7 @@ class ForwarderService:
                         effective_route,
                         reply_to,
                     )
-                    link = MessageLink(route.id, message.ref, destination)
+                    link = MessageLink(route.id, message.ref, destination, mode_used)
                     await self.links.save_many((link,))
                     outcomes.append(
                         DeliveryOutcome(route.id, (message.ref,), (destination,), mode_used)
@@ -167,15 +167,14 @@ class ForwarderService:
                 try:
                     existing = tuple([await self.links.get(route.id, source) for source in sources])
                     if all(link is not None for link in existing):
-                        destinations = tuple(
-                            link.destination for link in existing if link is not None
-                        )
+                        persisted = tuple(link for link in existing if link is not None)
+                        destinations = tuple(link.destination for link in persisted)
                         outcomes.append(
                             DeliveryOutcome(
                                 route.id,
                                 sources,
                                 destinations,
-                                route.mode,
+                                persisted[0].delivery_mode,
                                 deduplicated=True,
                             )
                         )
@@ -197,7 +196,7 @@ class ForwarderService:
                             f"{len(destinations)} destination references"
                         )
                     links = tuple(
-                        MessageLink(route.id, source, destination)
+                        MessageLink(route.id, source, destination, mode_used)
                         for source, destination in zip(sources, destinations, strict=True)
                     )
                     await self.links.save_many(links)
@@ -217,6 +216,11 @@ class ForwarderService:
         synchronized = 0
         failures: list[SyncFailure] = []
         for link in links:
+            if link.delivery_mode is ForwardMode.FORWARD:
+                # Telegram owns the rendering of native forwards; their source
+                # edit updates cannot be applied with edit_message.
+                synchronized += 1
+                continue
             try:
                 await self.telegram.edit_from_source(message, link.destination)
             except MessageNotModified:

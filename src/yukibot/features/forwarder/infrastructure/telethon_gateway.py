@@ -120,10 +120,10 @@ class TelethonGateway:
             except Exception as error:
                 raise _translate_error(error) from error
 
-    def chat_title(self, chat_id: int) -> str:
+    def chat_title(self, chat_id: int) -> str | None:
         peer = self._peers.get(chat_id)
         if peer is None:
-            return f"Channel {chat_id}"
+            return None
         title = getattr(peer, "title", None) or getattr(peer, "name", None)
         if isinstance(title, str) and title.strip():
             return title
@@ -132,7 +132,7 @@ class TelethonGateway:
             for value in (getattr(peer, "first_name", None), getattr(peer, "last_name", None))
             if isinstance(value, str) and value.strip()
         )
-        return " ".join(parts) or str(chat_id)
+        return " ".join(parts) or None
 
     def is_forum(self, chat_id: int) -> bool:
         peer = self._peers.get(chat_id)

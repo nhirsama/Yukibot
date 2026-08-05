@@ -292,7 +292,7 @@ Forwarder 负责：
 - 默认使用原生转发，受保护内容或不支持的操作回退为复制；
 - 为未显式指定目标话题的论坛路由创建并持久化同名话题；
 - 在源频道标题变化时同步自动话题标题；
-- 保持相册、回复关系、编辑和删除同步；
+- 保持相册、回复关系、copy 消息编辑和目标消息删除同步；
 - 记录源消息与目标消息的映射；
 - 保证自身任务幂等并防止转发循环。
 
@@ -320,6 +320,7 @@ MessageLink
 - source_message_id
 - destination_chat_id
 - destination_message_id
+- delivery_mode: forward | copy
 
 ManagedTopic
 - source_chat_id
@@ -367,7 +368,7 @@ Telethon update
     -> 幂等写入 ForwardJob
     -> worker 领取任务
     -> 查询路由、过滤与回复映射
-    -> 解析显式话题或幂等创建/同步自动话题
+    -> 按显式 topic_id 或持久化的自动 topic_id 定位
     -> Telegram gateway
     -> 写入 MessageLink
     -> 标记任务完成
