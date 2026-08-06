@@ -42,6 +42,10 @@ class _SummaryOutput(BaseModel):
     topics: list[_TopicOutput] = Field(min_length=1, max_length=12)
 
 
+class _UpstreamResponseError(RuntimeError):
+    pass
+
+
 class OpenAISummaryGenerator:
     def __init__(self) -> None:
         self._client: AsyncOpenAI | None = None
@@ -69,12 +73,20 @@ class OpenAISummaryGenerator:
                 self._config = config
             if self._client is None:
                 raise RuntimeError("OpenAI client was not initialized")
-            output_text = await _stream_text(
-                self._client,
-                model=config.model,
-                input_items=_input(system_prompt, user_prompt),
-                timeout=config.timeout,
-            )
+            input_items = _input(system_prompt, user_prompt)
+            for attempt in range(config.max_retries + 1):
+                try:
+                    output_text = await _stream_text(
+                        self._client,
+                        model=config.model,
+                        input_items=input_items,
+                        timeout=config.timeout,
+                    )
+                    break
+                except _UpstreamResponseError:
+                    if attempt == config.max_retries:
+                        raise
+                    await asyncio.sleep(2**attempt)
             output = _SummaryOutput.model_validate_json(output_text)
         except asyncio.CancelledError:
             raise
@@ -131,9 +143,16 @@ async def _stream_text(
         async for event in stream:
             if event.type == "response.output_text.delta" and isinstance(event.delta, str):
                 chunks.append(event.delta)
-            elif event.type in {"response.failed", "response.incomplete"}:
-                detail = event.response.error or event.response.incomplete_details
+            elif event.type == "response.failed":
+                detail = event.response.error
+                if detail is not None and str(detail.code) == "upstream_error":
+                    raise _UpstreamResponseError(str(detail))
                 raise RuntimeError(f"Responses stream ended with {event.type}: {detail}")
+            elif event.type == "response.incomplete":
+                raise RuntimeError(
+                    "Responses stream ended with response.incomplete: "
+                    f"{event.response.incomplete_details}"
+                )
             elif event.type == "error":
                 raise RuntimeError(f"Responses stream error: {event.message}")
     output_text = "".join(chunks)

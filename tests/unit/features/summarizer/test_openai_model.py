@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from yukibot.features.summarizer.errors import SummaryModelUnavailableError
-from yukibot.features.summarizer.infrastructure import OpenAISummaryGenerator
+from yukibot.features.summarizer.infrastructure import OpenAISummaryGenerator, openai_model
 from yukibot.features.summarizer.models import SummaryModelConfig
 
 
@@ -118,3 +118,40 @@ async def test_generator_rejects_non_openai_provider() -> None:
             system_prompt="system",
             user_prompt="user",
         )
+
+
+async def test_generator_retries_in_stream_upstream_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    delays: list[float] = []
+    output_text = (
+        '{"topics":[{"title":"Release","summary":"Version one shipped.",'
+        '"evidence_message_ids":[10]}]}'
+    )
+
+    async def stream_text(*args: object, **kwargs: object) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise openai_model._UpstreamResponseError("upstream failed")
+        return output_text
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(openai_model, "_stream_text", stream_text)
+    monkeypatch.setattr(openai_model.asyncio, "sleep", sleep)
+    generator = OpenAISummaryGenerator()
+    try:
+        document = await generator.generate(
+            config=SummaryModelConfig("openai", "deepseek-v4-flash", api_key="secret"),
+            system_prompt="system",
+            user_prompt="user",
+        )
+    finally:
+        await generator.reset()
+
+    assert attempts == 2
+    assert delays == [1]
+    assert document.topics[0].evidence_message_ids == (10,)
