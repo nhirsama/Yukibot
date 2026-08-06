@@ -111,6 +111,15 @@ class NativeClient(Protocol):
         limit: int,
     ) -> Sequence[NativeMessage]: ...
 
+    async def get_messages_recent(
+        self,
+        chat: object,
+        *,
+        since: datetime,
+        limit: int,
+        topic_id: int | None = None,
+    ) -> Sequence[NativeMessage]: ...
+
     async def forward_messages(
         self,
         target: object,
@@ -459,6 +468,53 @@ class TelethonClientAdapter:
         ):
             messages.append(_StableMessage(message, chat=chat))
         return tuple(messages)
+
+    async def get_messages_recent(
+        self,
+        chat: object,
+        *,
+        since: datetime,
+        limit: int,
+        topic_id: int | None = None,
+    ) -> Sequence[NativeMessage]:
+        if since.tzinfo is None:
+            raise ValueError("since must be timezone-aware")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if topic_id is not None and topic_id <= 0:
+            raise ValueError("topic_id must be positive")
+        raw_messages: list[object] = []
+        arguments: dict[str, object] = {"limit": limit}
+        if topic_id is not None:
+            arguments["reply_to"] = topic_id
+        async for message in self._client.iter_messages(chat, **arguments):
+            message_date = cast(datetime | None, getattr(message, "date", None))
+            if message_date is not None:
+                normalized_date = (
+                    message_date
+                    if message_date.tzinfo is not None
+                    else message_date.replace(tzinfo=UTC)
+                )
+                if normalized_date < since:
+                    break
+            raw_messages.append(message)
+        if topic_id is not None and not any(
+            int(getattr(message, "id", 0)) == topic_id for message in raw_messages
+        ):
+            topic_messages = await self._client.get_messages(chat, ids=[topic_id])
+            for message in topic_messages:
+                if message is None:
+                    continue
+                message_date = cast(datetime | None, getattr(message, "date", None))
+                topic_date = (
+                    message_date
+                    if message_date is None or message_date.tzinfo is not None
+                    else message_date.replace(tzinfo=UTC)
+                )
+                if topic_date is None or topic_date >= since:
+                    raw_messages.append(message)
+        raw_messages.sort(key=lambda message: int(getattr(message, "id", 0)))
+        return tuple(_StableMessage(message, chat=chat) for message in raw_messages[-limit:])
 
     async def forward_messages(
         self,

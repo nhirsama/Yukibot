@@ -21,6 +21,7 @@ from yukibot.features.forwarder.job_repository import SqliteForwardJobRepository
 from yukibot.features.forwarder.jobs import pending_jobs_for_event
 from yukibot.features.forwarder.migrations import FORWARDER_MIGRATIONS
 from yukibot.features.forwarder.repository import SqliteRouteRepository
+from yukibot.features.summarizer.repository import SqliteSummaryRepository
 from yukibot.kernel import LifecycleState
 
 
@@ -220,7 +221,75 @@ async def test_runtime_control_plane_manages_modules_admins_and_routes(
     assert help_response[0:2] == ("message", -4321)
     assert "/admin - 管理管理员和功能模块" in str(help_response[2])
     assert "/route - 管理消息转发路由" in str(help_response[2])
+    assert "/summary - 生成并发送消息总结" in str(help_response[2])
     assert help_response[-1] == 1
+
+    await client.handlers[NewEvent](  # type: ignore[operator]
+        FakeMessage(
+            101,
+            chat,
+            text="/admin module disable summarizer",
+            sender=owner,
+            outgoing=True,
+        )
+    )
+    assert not runtime.commands.recognizes("/summary list")
+    modules = {item.name: item for item in await runtime.modules.list_modules()}
+    assert modules["summarizer"].running is False
+
+    await client.handlers[NewEvent](  # type: ignore[operator]
+        FakeMessage(
+            102,
+            chat,
+            text="/admin module enable summarizer",
+            sender=owner,
+            outgoing=True,
+        )
+    )
+    assert runtime.commands.recognizes("/summary list")
+    assert runtime.commands.recognizes("/route list")
+
+    await client.handlers[NewEvent](  # type: ignore[operator]
+        FakeMessage(
+            103,
+            chat,
+            text="/summary add -1001 -2001 6h",
+            sender=owner,
+            outgoing=True,
+        )
+    )
+    summary_rules = await SqliteSummaryRepository(runtime.database).list_all()
+    assert len(summary_rules) == 1
+    assert summary_rules[0].window_seconds == 21600
+
+    client.messages[(-1001, 55)] = FakeMessage(55, FakePeer(-1001), text="summary input")
+    await client.handlers[NewEvent](  # type: ignore[operator]
+        FakeMessage(
+            104,
+            chat,
+            text="/summary run 1",
+            sender=owner,
+            outgoing=True,
+        )
+    )
+    assert "/summary model set" in str(client.calls[-1][2])
+
+    await client.handlers[NewEvent](  # type: ignore[operator]
+        FakeMessage(
+            105,
+            chat,
+            text=(
+                "/summary model set openai gpt-test "
+                "-api-key top-secret -base-url https://models.example/v1"
+            ),
+            sender=owner,
+            outgoing=True,
+        )
+    )
+    model_config = await SqliteSummaryRepository(runtime.database).get_model_config()
+    assert model_config is not None
+    assert model_config.api_key == "top-secret"
+    assert "top-secret" not in str(client.calls[-1][2])
 
     await client.handlers[NewEvent](  # type: ignore[operator]
         FakeMessage(

@@ -39,6 +39,15 @@ from yukibot.features.management.feature import ManagementFeature
 from yukibot.features.management.migrations import MANAGEMENT_MIGRATIONS
 from yukibot.features.management.repository import SqliteManagementRepository
 from yukibot.features.management.service import ManagementService
+from yukibot.features.summarizer.commands import SummarizerCommands
+from yukibot.features.summarizer.feature import SummarizerFeature
+from yukibot.features.summarizer.infrastructure import (
+    OpenAISummaryGenerator,
+    TelethonSummaryGateway,
+)
+from yukibot.features.summarizer.migrations import SUMMARIZER_MIGRATIONS
+from yukibot.features.summarizer.repository import SqliteSummaryRepository
+from yukibot.features.summarizer.service import SummarizerService
 from yukibot.kernel import (
     Application,
     CommandDispatcher,
@@ -57,6 +66,7 @@ class Runtime:
     bus: InProcessEventBus
     database: SqliteDatabase
     forwarder: ForwarderFeature
+    summarizer: SummarizerFeature
     management: ManagementFeature
     modules: ModuleController
     commands: CommandRegistry
@@ -75,7 +85,7 @@ def build_runtime(
     database = SqliteDatabase(settings.database_url)
     database_lifecycle = DatabaseLifecycle(
         database,
-        (*FORWARDER_MIGRATIONS, *MANAGEMENT_MIGRATIONS),
+        (*FORWARDER_MIGRATIONS, *MANAGEMENT_MIGRATIONS, *SUMMARIZER_MIGRATIONS),
     )
 
     client = native_client or create_telethon_client(
@@ -128,7 +138,30 @@ def build_runtime(
         poller=poller,
         rebuilder=rebuilder,
     )
-    modules = ModuleController((forwarder_feature,), management_repository)
+    summary_repository = SqliteSummaryRepository(database)
+    summary_gateway = TelethonSummaryGateway(
+        client,
+        peers,
+        request_limiter=request_limiter,
+    )
+    summary_generator = OpenAISummaryGenerator()
+    summarizer_service = SummarizerService(
+        summary_repository,
+        summary_repository,
+        summary_repository,
+        summary_gateway,
+        summary_generator,
+    )
+    summarizer_commands = SummarizerCommands(summarizer_service)
+    summarizer_feature = SummarizerFeature(
+        command_registry,
+        summarizer_commands.handle,
+        shutdown=summary_generator.reset,
+    )
+    modules = ModuleController(
+        (forwarder_feature, summarizer_feature),
+        management_repository,
+    )
     management_service = ManagementService(management_repository, modules, identity)
     management_commands = ManagementCommands(management_service)
     management_feature = ManagementFeature(command_registry, management_commands)
@@ -168,6 +201,7 @@ def build_runtime(
         bus,
         database,
         forwarder_feature,
+        summarizer_feature,
         management_feature,
         modules,
         command_registry,

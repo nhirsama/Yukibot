@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -194,6 +194,66 @@ async def test_stable_adapter_resolves_joins_and_reads_public_channel_history() 
     assert isinstance(raw.requests[0], JoinChannelRequest)
     assert raw.requests[0].channel == "input-source"
     assert raw.iteration == (joined, {"min_id": 80, "reverse": True, "limit": 25})
+
+
+async def test_stable_adapter_reads_recent_topic_history_with_topic_root() -> None:
+    now = datetime.now(UTC)
+    chat = types.InputPeerChannel(1001, 11)
+
+    def raw_message(message_id: int, date: datetime, text: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=message_id,
+            chat_id=-1000000001001,
+            sender_id=42,
+            grouped_id=None,
+            raw_text=text,
+            entities=(),
+            date=date,
+            chat=None,
+            input_chat=chat,
+            sender=None,
+            input_sender=None,
+            photo=None,
+            document=None,
+            audio=None,
+            video=None,
+            file=None,
+            reply_to_msg_id=42,
+            out=False,
+            noforwards=False,
+        )
+
+    root = raw_message(42, now - timedelta(minutes=30), "Topic root")
+    reply = raw_message(43, now - timedelta(minutes=5), "Recent reply")
+    old = raw_message(41, now - timedelta(hours=2), "Old reply")
+
+    class RawHistoryClient:
+        def __init__(self) -> None:
+            self.iteration = None
+            self.requested_ids = None
+
+        async def iter_messages(self, peer, **kwargs):  # type: ignore[no-untyped-def]
+            self.iteration = (peer, kwargs)
+            for item in (reply, old):
+                yield item
+
+        async def get_messages(self, peer, *, ids):  # type: ignore[no-untyped-def]
+            self.requested_ids = (peer, ids)
+            return [root]
+
+    raw = RawHistoryClient()
+    client = TelethonClientAdapter(raw)
+
+    messages = await client.get_messages_recent(
+        chat,
+        since=now - timedelta(hours=1),
+        limit=10,
+        topic_id=42,
+    )
+
+    assert [message.id for message in messages] == [42, 43]
+    assert raw.iteration == (chat, {"limit": 10, "reply_to": 42})
+    assert raw.requested_ids == (chat, [42])
 
 
 async def test_stable_adapter_reads_existing_invite_and_imports_it() -> None:

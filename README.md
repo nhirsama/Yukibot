@@ -10,10 +10,12 @@ Yukibot 是一个基于 Python 3.12、Telethon 1.44 和 SQLite 的模块化 Tele
 - 可排空的 Telethon event source 和 Forwarder 自有 gateway；
 - 显式组合根与 `yukibot` CLI；
 - 带外管理命令、SQLite 管理员与运行时模块开关；
-- Forwarder 功能及其框架接入层和路由管理命令。
+- Forwarder 功能及其框架接入层和路由管理命令；
+- 独立的 Summarizer 功能、结构化模型适配器和总结规则。
 
-整体边界见 [`docs/architecture.md`](docs/architecture.md)，Forwarder 说明见
-[`src/yukibot/features/forwarder/README.md`](src/yukibot/features/forwarder/README.md)。
+整体边界见 [`docs/architecture.md`](docs/architecture.md)，各功能说明见
+[`src/yukibot/features/forwarder/README.md`](src/yukibot/features/forwarder/README.md) 和
+[`src/yukibot/features/summarizer/README.md`](src/yukibot/features/summarizer/README.md)。
 
 ## Run
 
@@ -45,6 +47,8 @@ uv run yukibot
 /admin module list
 /admin module enable forwarder
 /admin module disable forwarder
+/admin module enable summarizer
+/admin module disable summarizer
 ```
 
 当前登录账号和已登记管理员都可以执行全部管理及功能命令，包括增删其他委派管理员。当前登录
@@ -125,6 +129,42 @@ Forwarder 提供：
 重新执行命令。间隔可通过 `YUKIBOT_REBUILD_JOIN_MIN_INTERVAL` 和
 `YUKIBOT_REBUILD_JOIN_MAX_INTERVAL` 调整，其中最小值不能低于 300 秒。
 当前登录账号和数据库中的委派管理员都可以执行这些命令。
+
+Summarizer 独立提供：
+
+```text
+/summary list
+/summary show <id>
+/summary add <source> <destination> [30m|6h|1d]
+/summary set <id> <source> <destination> [30m|6h|1d]
+/summary run <id> [30m|6h|1d]
+/summary enable <id>
+/summary disable <id>
+/summary remove <id>
+/summary model show
+/summary model set <provider> <model> [-api-key <key>] [-base-url <url>]
+/summary model tune <input_tokens> <output_tokens> <temperature> <timeout> <retries>
+/summary model clear
+```
+
+例如，将公开频道最近一天的内容总结到论坛群话题：
+
+```text
+/summary add @source_channel -1001234567890/42 1d
+/summary run 1
+```
+
+目标可以是私聊、频道、群组或论坛话题。论坛话题支持
+`-1001234567890/42`、`https://t.me/c/1234567890/42` 和
+`https://t.me/public_group/42`。模型、API 密钥和推理参数通过 `/summary model` 命令管理，保存在
+Summarizer 自己的业务配置表中；命令输出不会回显 API 密钥。详细配置、消息归一化和 map/reduce
+行为见 Summarizer 功能说明。
+
+APIArc 通过通用 OpenAI Responses 接口配置，使用官方模型 ID：
+
+```text
+/summary model set openai deepseek-v4-flash-free -api-key api-key -base-url https://apiarc.ai/v1
+```
 
 Forwarder handler 只将事件幂等写入 `forwarder_jobs`，由单个受监管 worker 按任务顺序发送。
 进程中断时，处于 `processing` 的任务会在下次启动恢复为 `pending`。严格 exactly-once 仍受

@@ -201,6 +201,37 @@ class FakeNativeClient:
             if key[0] == int(chat.id) and key[1] > after_message_id
         )[:limit]
 
+    async def get_messages_recent(
+        self,
+        chat: FakePeer,
+        *,
+        since: datetime,
+        limit: int,
+        topic_id: int | None = None,
+    ) -> tuple[FakeMessage, ...]:
+        self.calls.append(("recent", int(chat.id), since, limit, topic_id))
+        messages: list[FakeMessage] = []
+        for key in sorted(self.messages):
+            if key[0] != int(chat.id):
+                continue
+            message = self.messages[key]
+            date = message.date
+            if isinstance(date, datetime):
+                normalized = date if date.tzinfo is not None else date.replace(tzinfo=UTC)
+                if normalized < since:
+                    continue
+            if topic_id is not None:
+                reply = getattr(message._raw, "reply_to", None)
+                top_id = getattr(reply, "reply_to_top_id", None)
+                if (
+                    message.id != topic_id
+                    and message.replied_message_id != topic_id
+                    and top_id != topic_id
+                ):
+                    continue
+            messages.append(message)
+        return tuple(messages[-limit:])
+
     async def forward_messages(
         self,
         target,
