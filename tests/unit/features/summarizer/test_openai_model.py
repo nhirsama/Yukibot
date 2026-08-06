@@ -7,10 +7,14 @@ from yukibot.features.summarizer.infrastructure import OpenAISummaryGenerator, o
 from yukibot.features.summarizer.models import SummaryModelConfig
 
 
-@pytest.mark.parametrize("base_url", [None, "https://models.example/v1"])
+@pytest.mark.parametrize(
+    ("base_url", "empty_first"),
+    [(None, False), ("https://models.example/v1", True)],
+)
 async def test_generator_uses_only_official_responses_request(
     monkeypatch: pytest.MonkeyPatch,
     base_url: str | None,
+    empty_first: bool,
 ) -> None:
     client_calls: list[dict[str, object]] = []
     stream_calls: list[dict[str, object]] = []
@@ -27,11 +31,12 @@ async def test_generator_uses_only_official_responses_request(
             return "".join([None])  # type: ignore[list-item]
 
     class FakeStream:
-        def __init__(self) -> None:
-            self._events = iter(
+        def __init__(self, *, empty: bool) -> None:
+            events = [SimpleNamespace(type="response.in_progress")]
+            if not empty:
+                events.append(SimpleNamespace(type="response.output_text.delta", delta=output_text))
+            events.extend(
                 (
-                    SimpleNamespace(type="response.in_progress"),
-                    SimpleNamespace(type="response.output_text.delta", delta=output_text),
                     SimpleNamespace(
                         type="response.completed",
                         response=BrokenCompletedResponse(),
@@ -39,6 +44,7 @@ async def test_generator_uses_only_official_responses_request(
                     SimpleNamespace(type="ping"),
                 )
             )
+            self._events = iter(events)
 
         async def __aenter__(self) -> "FakeStream":
             return self
@@ -57,7 +63,10 @@ async def test_generator_uses_only_official_responses_request(
 
     def stream(**kwargs: object) -> FakeStream:
         stream_calls.append(kwargs)
-        return FakeStream()
+        return FakeStream(empty=empty_first and len(stream_calls) == 1)
+
+    async def sleep(delay: float) -> None:
+        assert delay == 1
 
     class FakeOpenAIClient:
         responses = SimpleNamespace(stream=stream)
@@ -74,6 +83,7 @@ async def test_generator_uses_only_official_responses_request(
         "yukibot.features.summarizer.infrastructure.openai_model.AsyncOpenAI",
         async_openai,
     )
+    monkeypatch.setattr(openai_model.asyncio, "sleep", sleep)
     generator = OpenAISummaryGenerator()
     config = SummaryModelConfig(
         "openai",
@@ -101,7 +111,8 @@ async def test_generator_uses_only_official_responses_request(
     assert document.topics[0].evidence_message_ids == (10,)
     assert document.topics[0].action_items[0].owner == "Alice"
 
-    request = stream_calls[0]
+    assert len(stream_calls) == (2 if empty_first else 1)
+    request = stream_calls[-1]
     assert request["model"] == "deepseek-v4-flash"
     assert request["timeout"] == 120
     assert "JSON Schema:" in str(request["input"])
@@ -134,7 +145,7 @@ async def test_generator_retries_in_stream_upstream_error(
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise openai_model._UpstreamResponseError("upstream failed")
+            raise openai_model._RetryableResponseError("upstream failed")
         return output_text
 
     async def sleep(delay: float) -> None:

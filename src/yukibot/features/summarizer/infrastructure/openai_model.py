@@ -42,7 +42,7 @@ class _SummaryOutput(BaseModel):
     topics: list[_TopicOutput] = Field(min_length=1, max_length=12)
 
 
-class _UpstreamResponseError(RuntimeError):
+class _RetryableResponseError(RuntimeError):
     pass
 
 
@@ -83,7 +83,7 @@ class OpenAISummaryGenerator:
                         timeout=config.timeout,
                     )
                     break
-                except _UpstreamResponseError:
+                except _RetryableResponseError:
                     if attempt == config.max_retries:
                         raise
                     await asyncio.sleep(2**attempt)
@@ -146,7 +146,7 @@ async def _stream_text(
             elif event.type == "response.failed":
                 detail = event.response.error
                 if detail is not None and str(detail.code) == "upstream_error":
-                    raise _UpstreamResponseError(str(detail))
+                    raise _RetryableResponseError(str(detail))
                 raise RuntimeError(f"Responses stream ended with {event.type}: {detail}")
             elif event.type == "response.incomplete":
                 raise RuntimeError(
@@ -157,7 +157,7 @@ async def _stream_text(
                 raise RuntimeError(f"Responses stream error: {event.message}")
     output_text = "".join(chunks)
     if not output_text.strip():
-        raise ValueError("Responses API did not return output text")
+        raise _RetryableResponseError("Responses API did not return output text")
     return output_text
 
 
