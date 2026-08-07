@@ -11,6 +11,7 @@ from .models import (
     SummaryDocument,
     SummaryEndpoint,
     SummaryModelConfig,
+    SummaryPromptPreset,
     SummaryRule,
     SummaryRuleDraft,
     SummaryRun,
@@ -115,7 +116,8 @@ class SqliteSummaryRepository:
         row = await self._database.fetch_one(
             """
             SELECT provider, model, api_key, base_url, input_token_limit,
-                   output_token_limit, temperature, timeout, max_retries
+                   output_token_limit, temperature, timeout, max_retries,
+                   prompt_preset, custom_prompt, max_concurrency
             FROM summarizer_model_config WHERE id = 1
             """
         )
@@ -131,6 +133,9 @@ class SqliteSummaryRepository:
             temperature=_float(row, "temperature"),
             timeout=_float(row, "timeout"),
             max_retries=_int(row, "max_retries"),
+            prompt_preset=SummaryPromptPreset(_str(row, "prompt_preset")),
+            custom_prompt=_optional_str(row, "custom_prompt"),
+            max_concurrency=_int(row, "max_concurrency"),
         )
 
     async def save_model_config(self, config: SummaryModelConfig) -> None:
@@ -138,8 +143,9 @@ class SqliteSummaryRepository:
             """
             INSERT INTO summarizer_model_config (
                 id, provider, model, api_key, base_url, input_token_limit,
-                output_token_limit, temperature, timeout, max_retries
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_token_limit, temperature, timeout, max_retries,
+                prompt_preset, custom_prompt, max_concurrency
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 provider = excluded.provider,
                 model = excluded.model,
@@ -150,6 +156,9 @@ class SqliteSummaryRepository:
                 temperature = excluded.temperature,
                 timeout = excluded.timeout,
                 max_retries = excluded.max_retries,
+                prompt_preset = excluded.prompt_preset,
+                custom_prompt = excluded.custom_prompt,
+                max_concurrency = excluded.max_concurrency,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (
@@ -162,6 +171,9 @@ class SqliteSummaryRepository:
                 config.temperature,
                 config.timeout,
                 config.max_retries,
+                config.prompt_preset.value,
+                config.custom_prompt,
+                config.max_concurrency,
             ),
         )
 

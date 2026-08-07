@@ -49,7 +49,7 @@ class SummaryTelegram(Protocol):
         source: SummaryEndpoint,
         *,
         since: datetime,
-        limit: int,
+        limit: int | None = None,
     ) -> FetchedSummaryMessages: ...
 
     async def send_text(self, destination: SummaryEndpoint, text: str) -> MessageRef: ...

@@ -143,8 +143,13 @@ Summarizer 独立提供：
 /summary remove <id>
 /summary model show
 /summary model set <provider> <model> [-api-key <key>] [-base-url <url>]
-/summary model tune <input_tokens> <output_tokens> <temperature> <timeout> <retries>
+/summary model tune <input_tokens> <output_tokens> <temperature> <timeout> <retries> [concurrency]
 /summary model clear
+/summary prompt list
+/summary prompt show
+/summary prompt use <focused|decisions|technical|digest>
+/summary prompt custom <自定义偏好>
+/summary prompt clear
 ```
 
 例如，将公开频道最近一天的内容总结到论坛群话题：
@@ -157,8 +162,9 @@ Summarizer 独立提供：
 目标可以是私聊、频道、群组或论坛话题。论坛话题支持
 `-1001234567890/42`、`https://t.me/c/1234567890/42` 和
 `https://t.me/public_group/42`。模型、API 密钥和推理参数通过 `/summary model` 命令管理，保存在
-Summarizer 自己的业务配置表中；命令输出不会回显 API 密钥。详细配置、消息归一化和 map/reduce
-行为见 Summarizer 功能说明。
+Summarizer 自己的业务配置表中；命令输出不会回显 API 密钥。每次运行会读取完整时间窗，不设置
+消息条数硬上限；map 分块和同一 reduce 层的独立分组会按 `concurrency` 并发处理。提示词可以选择
+内置预设或持久化自定义偏好。详细配置、消息归一化和 map/reduce 行为见 Summarizer 功能说明。
 
 APIArc 通过通用 OpenAI Responses 接口配置，使用官方模型 ID：
 

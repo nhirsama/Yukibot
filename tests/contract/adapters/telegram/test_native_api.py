@@ -247,12 +247,12 @@ async def test_stable_adapter_reads_recent_topic_history_with_topic_root() -> No
     messages = await client.get_messages_recent(
         chat,
         since=now - timedelta(hours=1),
-        limit=10,
+        limit=None,
         topic_id=42,
     )
 
     assert [message.id for message in messages] == [42, 43]
-    assert raw.iteration == (chat, {"limit": 10, "reply_to": 42})
+    assert raw.iteration == (chat, {"limit": None, "reply_to": 42})
     assert raw.requested_ids == (chat, [42])
 
 

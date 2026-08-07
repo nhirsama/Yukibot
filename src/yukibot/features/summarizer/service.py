@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Coroutine
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from .errors import (
     NoMessagesToSummarizeError,
@@ -21,6 +24,7 @@ from .models import (
     SummaryExecution,
     SummaryMessage,
     SummaryModelConfig,
+    SummaryPromptPreset,
     SummaryRule,
     SummaryRuleDraft,
     SummaryRun,
@@ -33,7 +37,7 @@ from .ports import (
     SummaryRunRepository,
     SummaryTelegram,
 )
-from .prompts import PROMPT_VERSION, map_prompts, reduce_prompts
+from .prompts import PROMPT_VERSION, map_prompts, prompt_preference, reduce_prompts
 
 _PROMPT_RESERVE_TOKENS = 2000
 _MAX_BATCH_INPUT_TOKENS = 12000
@@ -49,12 +53,11 @@ class SummarizerService:
         generator: StructuredSummaryGenerator,
         *,
         default_window_seconds: int = 86400,
-        max_messages: int = 500,
         max_topics: int = 12,
     ) -> None:
         if not 60 <= default_window_seconds <= 30 * 86400:
             raise ValueError("default summary window must be between 60 seconds and 30 days")
-        if max_messages <= 0 or max_topics <= 0:
+        if max_topics <= 0:
             raise ValueError("summary limits must be positive")
         self._rules = rules
         self._runs = runs
@@ -62,7 +65,6 @@ class SummarizerService:
         self._telegram = telegram
         self._generator = generator
         self._default_window_seconds = default_window_seconds
-        self._max_messages = max_messages
         self._max_topics = max_topics
 
     @property
@@ -112,6 +114,7 @@ class SummarizerService:
         temperature: float,
         timeout: float,
         max_retries: int,
+        max_concurrency: int | None = None,
     ) -> SummaryModelConfig:
         current = await self._require_model_config()
         config = replace(
@@ -121,8 +124,27 @@ class SummarizerService:
             temperature=temperature,
             timeout=timeout,
             max_retries=max_retries,
+            max_concurrency=(
+                current.max_concurrency if max_concurrency is None else max_concurrency
+            ),
         )
         await self._generator.reset()
+        await self._model_configs.save_model_config(config)
+        return config
+
+    async def set_prompt_preset(self, preset: str) -> SummaryModelConfig:
+        current = await self._require_model_config()
+        try:
+            selected = SummaryPromptPreset(preset.strip().casefold())
+        except ValueError as error:
+            raise ValueError(f"未知总结预设: {preset}") from error
+        config = replace(current, prompt_preset=selected, custom_prompt=None)
+        await self._model_configs.save_model_config(config)
+        return config
+
+    async def set_custom_prompt(self, prompt: str) -> SummaryModelConfig:
+        current = await self._require_model_config()
+        config = replace(current, custom_prompt=prompt)
         await self._model_configs.save_model_config(config)
         return config
 
@@ -209,7 +231,7 @@ class SummarizerService:
         fetched = await self._telegram.fetch_recent(
             rule.source,
             since=started_at - timedelta(seconds=effective_window),
-            limit=self._max_messages,
+            limit=None,
         )
         useful = tuple(message for message in fetched.messages if message.text.strip())
         if not useful:
@@ -264,34 +286,69 @@ class SummarizerService:
         source: FetchedSummaryMessages,
         model_config: SummaryModelConfig,
     ) -> SummaryDocument:
+        preference = prompt_preference(
+            model_config.prompt_preset,
+            model_config.custom_prompt,
+        )
         batches = _message_batches(
             source.messages,
             input_token_limit=model_config.input_token_limit,
             output_token_limit=model_config.output_token_limit,
+            preference=preference,
         )
-        documents: list[SummaryDocument] = []
-        for batch in batches:
-            allowed = frozenset(
-                message_id for message in batch for message_id in message.message_ids
-            )
-            system, user = map_prompts(source, [_message_payload(message) for message in batch])
+        semaphore = asyncio.Semaphore(model_config.max_concurrency)
+        mapped = await _gather_cancel_on_error(
+            [
+                self._summarize_batch(
+                    source,
+                    batch,
+                    model_config,
+                    preference,
+                    semaphore,
+                )
+                for batch in batches
+            ]
+        )
+        documents = tuple(document for document in mapped if document.topics)
+        if not documents:
+            return SummaryDocument()
+        return await self._reduce_documents(
+            source,
+            documents,
+            model_config,
+            preference,
+            semaphore,
+        )
+
+    async def _summarize_batch(
+        self,
+        source: FetchedSummaryMessages,
+        batch: tuple[SummaryMessage, ...],
+        model_config: SummaryModelConfig,
+        preference: str,
+        semaphore: asyncio.Semaphore,
+    ) -> SummaryDocument:
+        allowed = frozenset(message_id for message in batch for message_id in message.message_ids)
+        system, user = map_prompts(
+            source,
+            [_message_payload(message) for message in batch],
+            preference,
+        )
+        async with semaphore:
             generated = await self._generator.generate(
                 config=model_config,
                 system_prompt=system,
                 user_prompt=user,
             )
-            filtered = _ground_document(generated, allowed, max_topics=self._max_topics)
-            if filtered.topics:
-                documents.append(filtered)
-        if not documents:
-            raise SummarizerError("模型没有返回带有效消息证据的摘要")
-        return await self._reduce_documents(source, tuple(documents), model_config)
+        return _ground_document(generated, allowed, max_topics=self._max_topics)
 
     async def _reduce_documents(
         self,
         source: FetchedSummaryMessages,
         documents: tuple[SummaryDocument, ...],
         model_config: SummaryModelConfig,
+        preference: str,
+        semaphore: asyncio.Semaphore,
     ) -> SummaryDocument:
         current = documents
         allowed_ids = frozenset(
@@ -303,26 +360,45 @@ class SummarizerService:
                 current,
                 input_token_limit=model_config.input_token_limit,
                 output_token_limit=model_config.output_token_limit,
+                preference=preference,
             )
             if all(len(group) == 1 for group in groups):
                 return _merge_documents(current, self._max_topics)
-            reduced_documents: list[SummaryDocument] = []
-            for group in groups:
-                if len(group) == 1:
-                    reduced_documents.append(group[0])
-                    continue
-                system, user = reduce_prompts(source, group)
-                reduced = await self._generator.generate(
-                    config=model_config,
-                    system_prompt=system,
-                    user_prompt=user,
-                )
-                grounded = _ground_document(reduced, allowed_ids, max_topics=self._max_topics)
-                reduced_documents.append(
-                    grounded if grounded.topics else _merge_documents(group, self._max_topics)
-                )
-            current = tuple(reduced_documents)
+            current = await _gather_cancel_on_error(
+                [
+                    self._reduce_group(
+                        source,
+                        group,
+                        model_config,
+                        preference,
+                        semaphore,
+                        allowed_ids,
+                    )
+                    for group in groups
+                ]
+            )
         return current[0]
+
+    async def _reduce_group(
+        self,
+        source: FetchedSummaryMessages,
+        group: tuple[SummaryDocument, ...],
+        model_config: SummaryModelConfig,
+        preference: str,
+        semaphore: asyncio.Semaphore,
+        allowed_ids: frozenset[int],
+    ) -> SummaryDocument:
+        if len(group) == 1:
+            return group[0]
+        system, user = reduce_prompts(source, group, preference)
+        async with semaphore:
+            reduced = await self._generator.generate(
+                config=model_config,
+                system_prompt=system,
+                user_prompt=user,
+            )
+        grounded = _ground_document(reduced, allowed_ids, max_topics=self._max_topics)
+        return grounded if grounded.topics else _merge_documents(group, self._max_topics)
 
 
 def _merge_messages(messages: tuple[SummaryMessage, ...]) -> tuple[SummaryMessage, ...]:
@@ -380,8 +456,13 @@ def _message_batches(
     *,
     input_token_limit: int,
     output_token_limit: int,
+    preference: str = "",
 ) -> tuple[tuple[SummaryMessage, ...], ...]:
-    token_budget = _batch_token_budget(input_token_limit, output_token_limit)
+    token_budget = _batch_token_budget(
+        input_token_limit,
+        output_token_limit,
+        extra_reserved_tokens=_estimate_tokens(preference),
+    )
     batches: list[list[SummaryMessage]] = [[]]
     used = 0
     for message in messages:
@@ -401,12 +482,17 @@ def _document_batches(
     *,
     input_token_limit: int,
     output_token_limit: int,
+    preference: str = "",
 ) -> tuple[tuple[SummaryDocument, ...], ...]:
-    token_budget = _batch_token_budget(input_token_limit, output_token_limit)
+    token_budget = _batch_token_budget(
+        input_token_limit,
+        output_token_limit,
+        extra_reserved_tokens=_estimate_tokens(preference),
+    )
     batches: list[list[SummaryDocument]] = [[]]
     for document in documents:
         candidate = (*batches[-1], document)
-        system, user = reduce_prompts(source, candidate)
+        system, user = reduce_prompts(source, candidate, preference)
         if batches[-1] and _estimate_tokens(system + user) > token_budget:
             batches.append([document])
         else:
@@ -414,9 +500,16 @@ def _document_batches(
     return tuple(tuple(batch) for batch in batches if batch)
 
 
-def _batch_token_budget(input_token_limit: int, output_token_limit: int) -> int:
-    available = input_token_limit - output_token_limit - _PROMPT_RESERVE_TOKENS
-    if available < 1000:
+def _batch_token_budget(
+    input_token_limit: int,
+    output_token_limit: int,
+    *,
+    extra_reserved_tokens: int = 0,
+) -> int:
+    available = (
+        input_token_limit - output_token_limit - _PROMPT_RESERVE_TOKENS - extra_reserved_tokens
+    )
+    if available < 128:
         raise ValueError("summary model token limits leave no usable input budget")
     return min(available, _MAX_BATCH_INPUT_TOKENS)
 
@@ -514,8 +607,24 @@ def _clean_strings(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(cleaned for value in values if (cleaned := " ".join(value.split()))))
 
 
+async def _gather_cancel_on_error[T](
+    coroutines: list[Coroutine[Any, Any, T]],
+) -> tuple[T, ...]:
+    tasks = [asyncio.create_task(coroutine) for coroutine in coroutines]
+    try:
+        return tuple(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 def _render(document: SummaryDocument, source: FetchedSummaryMessages) -> str:
     lines = [f"{source.chat_title} 消息总结"]
+    if not document.topics:
+        lines.extend(("", "所选时间范围内没有值得总结的有效信息。"))
+        return "\n".join(lines)
     for index, topic in enumerate(document.topics, start=1):
         lines.extend(("", f"{index}. {topic.title}", topic.summary))
         if source.chat_kind is not SummaryChatKind.CHANNEL and topic.participants:
@@ -531,10 +640,16 @@ def _render(document: SummaryDocument, source: FetchedSummaryMessages) -> str:
             lines.append(f"行动项: {detail}")
         if topic.open_questions:
             lines.append(f"待确认: {'; '.join(topic.open_questions)}")
-        evidence = [
-            _message_reference(source, message_id) for message_id in topic.evidence_message_ids
-        ]
-        lines.append(f"原消息: {' '.join(evidence)}")
+        evidence = sorted(set(topic.evidence_message_ids))
+        first_message_id, last_message_id = evidence[0], evidence[-1]
+        message_range = (
+            str(first_message_id)
+            if first_message_id == last_message_id
+            else f"{first_message_id}-{last_message_id}"
+        )
+        lines.append(
+            f"原消息: {_message_reference(source, first_message_id)} | 消息范围: {message_range}"
+        )
     return "\n".join(lines)
 
 

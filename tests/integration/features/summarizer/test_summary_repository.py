@@ -12,6 +12,7 @@ from yukibot.features.summarizer.models import (
     SummaryDocument,
     SummaryEndpoint,
     SummaryModelConfig,
+    SummaryPromptPreset,
     SummaryRule,
     SummaryRuleDraft,
     SummaryRun,
@@ -53,12 +54,21 @@ async def test_summary_repository_persists_rules_runs_and_cascades_deletes(
             base_url="https://models.example/v1",
             input_token_limit=16000,
             output_token_limit=2000,
+            prompt_preset=SummaryPromptPreset.TECHNICAL,
+            custom_prompt="只保留故障根因和验证结果",
+            max_concurrency=5,
         )
         await repository.save_model_config(model_config)
         stored_config = await repository.get_model_config()
         assert stored_config == model_config
         assert stored_config is not None
         assert "top-secret" not in repr(stored_config)
+        columns = await database.fetch_all("PRAGMA table_info(summarizer_model_config)")
+        assert {row["name"] for row in columns} >= {
+            "prompt_preset",
+            "custom_prompt",
+            "max_concurrency",
+        }
 
         configured = await repository.add_auto(draft)
         assert configured.id == 1

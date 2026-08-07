@@ -60,7 +60,7 @@ async def test_gateway_fetches_normalized_topic_history_and_sends_to_topic() -> 
     gateway = TelethonSummaryGateway(client, peers)  # type: ignore[arg-type]
     endpoint = SummaryEndpoint(-1001, 42, "source_group")
 
-    fetched = await gateway.fetch_recent(endpoint, since=now - timedelta(hours=1), limit=50)
+    fetched = await gateway.fetch_recent(endpoint, since=now - timedelta(hours=1), limit=None)
     sent = await gateway.send_text(SummaryEndpoint(-1002, 99), "summary")
 
     assert fetched.source == endpoint
@@ -70,6 +70,7 @@ async def test_gateway_fetches_normalized_topic_history_and_sends_to_topic() -> 
     assert fetched.messages[1].links == ("https://example.com/item",)
     assert sent.chat_id == -1002
     assert client.calls[0][0] == "recent"
+    assert client.calls[0][3] is None
     assert client.calls[0][4] == 42
     assert client.calls[-1] == ("message", -1002, "summary", None, 99)
 

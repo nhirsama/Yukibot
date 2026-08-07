@@ -206,7 +206,7 @@ class FakeNativeClient:
         chat: FakePeer,
         *,
         since: datetime,
-        limit: int,
+        limit: int | None = None,
         topic_id: int | None = None,
     ) -> tuple[FakeMessage, ...]:
         self.calls.append(("recent", int(chat.id), since, limit, topic_id))
@@ -230,7 +230,7 @@ class FakeNativeClient:
                 ):
                     continue
             messages.append(message)
-        return tuple(messages[-limit:])
+        return tuple(messages if limit is None else messages[-limit:])
 
     async def forward_messages(
         self,

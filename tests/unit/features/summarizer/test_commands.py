@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from yukibot.contracts import MessageRef
 from yukibot.features.summarizer.commands import SUMMARY_HELP, SummarizerCommands
 from yukibot.features.summarizer.errors import SummarizerError
@@ -7,6 +9,7 @@ from yukibot.features.summarizer.models import (
     SummaryEndpoint,
     SummaryExecution,
     SummaryModelConfig,
+    SummaryPromptPreset,
     SummaryRule,
 )
 from yukibot.kernel import ControlCommand
@@ -47,6 +50,7 @@ class FakeService:
         temperature: float,
         timeout: float,
         max_retries: int,
+        max_concurrency: int | None = None,
     ) -> SummaryModelConfig:
         self.calls.append(
             (
@@ -56,20 +60,37 @@ class FakeService:
                 temperature,
                 timeout,
                 max_retries,
+                max_concurrency,
             )
         )
         assert self.model_config is not None
-        self.model_config = SummaryModelConfig(
-            self.model_config.provider,
-            self.model_config.model,
-            self.model_config.api_key,
-            self.model_config.base_url,
-            input_token_limit,
-            output_token_limit,
-            temperature,
-            timeout,
-            max_retries,
+        self.model_config = replace(
+            self.model_config,
+            input_token_limit=input_token_limit,
+            output_token_limit=output_token_limit,
+            temperature=temperature,
+            timeout=timeout,
+            max_retries=max_retries,
+            max_concurrency=(
+                self.model_config.max_concurrency if max_concurrency is None else max_concurrency
+            ),
         )
+        return self.model_config
+
+    async def set_prompt_preset(self, preset: str) -> SummaryModelConfig:
+        self.calls.append(("prompt-use", preset))
+        assert self.model_config is not None
+        self.model_config = replace(
+            self.model_config,
+            prompt_preset=SummaryPromptPreset(preset),
+            custom_prompt=None,
+        )
+        return self.model_config
+
+    async def set_custom_prompt(self, prompt: str) -> SummaryModelConfig:
+        self.calls.append(("prompt-custom", prompt))
+        assert self.model_config is not None
+        self.model_config = replace(self.model_config, custom_prompt=prompt)
         return self.model_config
 
     async def clear_model_config(self) -> bool:
@@ -175,9 +196,45 @@ async def test_model_configuration_commands_are_persisted_and_redacted() -> None
             "top-secret",
             "https://models.example/v1",
         ),
-        ("model-tune", 16000, 2000, 0.2, 60.0, 3),
+        ("model-tune", 16000, 2000, 0.2, 60.0, 3, None),
         ("model-clear",),
     ]
+
+
+async def test_prompt_commands_list_select_customize_and_clear() -> None:
+    service = FakeService()
+    service.model_config = SummaryModelConfig("openai", "gpt-test")
+    commands = SummarizerCommands(service)  # type: ignore[arg-type]
+
+    presets = await commands.handle(command("prompt list"))
+    selected = await commands.handle(command("prompt use technical"))
+    customized = await commands.handle(command("prompt custom 只保留发布版本、故障根因和验证结果"))
+    shown = await commands.handle(command("prompt show"))
+    cleared = await commands.handle(command("prompt clear"))
+
+    assert presets.text is not None
+    assert all(name in presets.text for name in ("focused", "decisions", "technical", "digest"))
+    assert selected.text is not None and "prompt: technical" in selected.text
+    assert customized.text is not None and "prompt: custom" in customized.text
+    assert shown.text is not None and "故障根因" in shown.text
+    assert cleared.text is not None and "prompt: focused" in cleared.text
+    assert service.calls == [
+        ("prompt-use", "technical"),
+        ("prompt-custom", "只保留发布版本、故障根因和验证结果"),
+        ("prompt-use", "focused"),
+    ]
+
+
+async def test_model_tune_accepts_and_displays_concurrency() -> None:
+    service = FakeService()
+    service.model_config = SummaryModelConfig("openai", "gpt-test")
+    commands = SummarizerCommands(service)  # type: ignore[arg-type]
+
+    tuned = await commands.handle(command("model tune 16000 2000 0.2 60 3 5"))
+
+    assert tuned.text is not None
+    assert "concurrency: 5" in tuned.text
+    assert service.calls == [("model-tune", 16000, 2000, 0.2, 60.0, 3, 5)]
 
 
 async def test_model_configuration_accepts_telegram_typographic_dashes() -> None:

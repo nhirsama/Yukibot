@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -14,6 +16,7 @@ from yukibot.features.summarizer.models import (
     SummaryEndpoint,
     SummaryMessage,
     SummaryModelConfig,
+    SummaryPromptPreset,
     SummaryRule,
     SummaryRuleDraft,
     SummaryRun,
@@ -79,7 +82,7 @@ class FakeSummaryTelegram:
         source: SummaryEndpoint,
         *,
         since: datetime,
-        limit: int,
+        limit: int | None,
     ) -> FetchedSummaryMessages:
         self.fetches.append((source, since, limit))
         return self.fetched
@@ -109,6 +112,54 @@ class FakeSummaryGenerator:
         self.configs.append(config)
         self.prompts.append((system_prompt, user_prompt))
         return self.responses.pop(0)
+
+
+class ConcurrentSummaryGenerator:
+    def __init__(self) -> None:
+        self.active = {"map": 0, "reduce": 0}
+        self.peak = {"map": 0, "reduce": 0}
+        self.ready = {"map": asyncio.Event(), "reduce": asyncio.Event()}
+
+    async def reset(self) -> None:
+        pass
+
+    async def generate(
+        self,
+        *,
+        config: SummaryModelConfig,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> SummaryDocument:
+        del config, system_prompt
+        payload = json.loads(user_prompt.rsplit("\n", maxsplit=1)[1])
+        phase = "map" if "messages" in payload else "reduce"
+        evidence = (
+            [message_id for item in payload["messages"] for message_id in item["message_ids"]]
+            if phase == "map"
+            else [
+                message_id
+                for candidate in payload["candidates"]
+                for topic in candidate["topics"]
+                for message_id in topic["evidence_message_ids"]
+            ]
+        )
+        self.active[phase] += 1
+        self.peak[phase] = max(self.peak[phase], self.active[phase])
+        if self.active[phase] >= 2:
+            self.ready[phase].set()
+        try:
+            await asyncio.wait_for(self.ready[phase].wait(), timeout=1)
+            return SummaryDocument(
+                (
+                    SummaryTopic(
+                        f"{phase}-{min(evidence)}",
+                        "中" * 1500,
+                        tuple(evidence),
+                    ),
+                )
+            )
+        finally:
+            self.active[phase] -= 1
 
 
 def message(
@@ -187,12 +238,19 @@ async def test_model_configuration_is_managed_as_business_data() -> None:
         temperature=0.2,
         timeout=60,
         max_retries=3,
+        max_concurrency=4,
     )
+    selected = await service.set_prompt_preset("technical")
+    customized = await service.set_custom_prompt("只保留故障根因和验证结果")
 
     assert configured.provider == "openai"
     assert configured.api_key == "secret"
     assert "secret" not in repr(configured)
     assert tuned.input_token_limit == 16000
+    assert tuned.max_concurrency == 4
+    assert selected.prompt_preset is SummaryPromptPreset.TECHNICAL
+    assert selected.custom_prompt is None
+    assert customized.custom_prompt == "只保留故障根因和验证结果"
     assert await service.clear_model_config()
     assert await service.get_model_config() is None
     assert generator.reset_calls == 3
@@ -236,7 +294,7 @@ async def test_run_merges_messages_grounds_model_output_and_sends_to_topic() -> 
                     SummaryTopic(
                         "  Release   update ",
                         " Version   one shipped. ",
-                        (10, 999, 10),
+                        (10, 11, 999, 10),
                         (" Alice ", "Alice"),
                         (" Published ",),
                         (SummaryActionItem(" Verify ", " Alice "),),
@@ -256,15 +314,45 @@ async def test_run_merges_messages_grounds_model_output_and_sends_to_topic() -> 
     assert telegram.sent[0][0] == SummaryEndpoint(-1002, topic_id=42)
     assert "Release update" in telegram.sent[0][1]
     assert "https://t.me/source_channel/10" in telegram.sent[0][1]
+    assert "https://t.me/source_channel/11" not in telegram.sent[0][1]
+    assert "消息范围: 10-11" in telegram.sent[0][1]
     assert "/999" not in telegram.sent[0][1]
     assert '"message_ids":[10,11]' in generator.prompts[0][1]
     assert generator.configs == [repository.model_config]
     assert len(repository.runs) == 1
     assert repository.runs[0].message_count == 2
-    assert repository.runs[0].document.topics[0].evidence_message_ids == (10,)
+    assert repository.runs[0].document.topics[0].evidence_message_ids == (10, 11)
     assert telegram.fetches[0][0] == rule.source
+    assert telegram.fetches[0][2] is None
     age = datetime.now(UTC) - telegram.fetches[0][1]
     assert timedelta(minutes=59) < age < timedelta(minutes=61)
+
+
+async def test_run_treats_an_empty_document_as_no_useful_information() -> None:
+    repository = MemorySummaryRepository()
+    telegram = FakeSummaryTelegram()
+    telegram.fetched = FetchedSummaryMessages(
+        telegram.endpoints["source"],
+        SummaryChatKind.GROUP,
+        "Chatty group",
+        (message(10, "早上好"),),
+    )
+    repository.rules[1] = SummaryRule(
+        1, telegram.endpoints["source"], telegram.endpoints["destination"]
+    )
+    service = SummarizerService(
+        repository,
+        repository,
+        repository,
+        telegram,
+        FakeSummaryGenerator([SummaryDocument()]),
+    )
+
+    execution = await service.run_rule(1)
+
+    assert execution.topic_count == 0
+    assert "没有值得总结的有效信息" in telegram.sent[0][1]
+    assert repository.runs[0].document == SummaryDocument()
 
 
 async def test_large_history_uses_map_reduce_and_discards_invented_evidence() -> None:
@@ -289,7 +377,7 @@ async def test_large_history_uses_map_reduce_and_discards_invented_evidence() ->
     repository.model_config = SummaryModelConfig(
         "test",
         "small-context",
-        input_token_limit=3500,
+        input_token_limit=4000,
         output_token_limit=500,
     )
     repository.rules[1] = SummaryRule(
@@ -344,7 +432,9 @@ async def test_chinese_history_uses_conservative_batches_and_hierarchical_reduce
 
     execution = await service.run_rule(1)
 
-    map_prompts_seen = [prompt for prompt in generator.prompts if "请总结下面 JSON" in prompt[1]]
+    map_prompts_seen = [
+        prompt for prompt in generator.prompts if "请筛选并总结下面 JSON" in prompt[1]
+    ]
     reduce_prompts_seen = [prompt for prompt in generator.prompts if "分批摘要候选" in prompt[1]]
     assert len(map_prompts_seen) == 5
     assert len(reduce_prompts_seen) == 3
@@ -356,3 +446,38 @@ async def test_chinese_history_uses_conservative_batches_and_hierarchical_reduce
         13,
         14,
     )
+
+
+async def test_map_and_independent_reduce_groups_run_with_bounded_concurrency() -> None:
+    repository = MemorySummaryRepository()
+    telegram = FakeSummaryTelegram()
+    telegram.fetched = FetchedSummaryMessages(
+        telegram.endpoints["source"],
+        SummaryChatKind.GROUP,
+        "Busy group",
+        tuple(
+            message(
+                100 + index,
+                "中" * 4000,
+                minute=index,
+                sender_id=100 + index,
+                sender_name=f"User {index}",
+            )
+            for index in range(6)
+        ),
+    )
+    repository.model_config = SummaryModelConfig(
+        "test",
+        "concurrent-test",
+        max_concurrency=2,
+    )
+    repository.rules[1] = SummaryRule(
+        1, telegram.endpoints["source"], telegram.endpoints["destination"]
+    )
+    generator = ConcurrentSummaryGenerator()
+    service = SummarizerService(repository, repository, repository, telegram, generator)
+
+    execution = await service.run_rule(1)
+
+    assert execution.topic_count == 1
+    assert generator.peak == {"map": 2, "reduce": 2}

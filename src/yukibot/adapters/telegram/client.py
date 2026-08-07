@@ -116,7 +116,7 @@ class NativeClient(Protocol):
         chat: object,
         *,
         since: datetime,
-        limit: int,
+        limit: int | None = None,
         topic_id: int | None = None,
     ) -> Sequence[NativeMessage]: ...
 
@@ -474,12 +474,12 @@ class TelethonClientAdapter:
         chat: object,
         *,
         since: datetime,
-        limit: int,
+        limit: int | None = None,
         topic_id: int | None = None,
     ) -> Sequence[NativeMessage]:
         if since.tzinfo is None:
             raise ValueError("since must be timezone-aware")
-        if limit <= 0:
+        if limit is not None and limit <= 0:
             raise ValueError("limit must be positive")
         if topic_id is not None and topic_id <= 0:
             raise ValueError("topic_id must be positive")
@@ -514,7 +514,8 @@ class TelethonClientAdapter:
                 if topic_date is None or topic_date >= since:
                     raw_messages.append(message)
         raw_messages.sort(key=lambda message: int(getattr(message, "id", 0)))
-        return tuple(_StableMessage(message, chat=chat) for message in raw_messages[-limit:])
+        selected = raw_messages if limit is None else raw_messages[-limit:]
+        return tuple(_StableMessage(message, chat=chat) for message in selected)
 
     async def forward_messages(
         self,

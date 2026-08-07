@@ -74,6 +74,28 @@ SUMMARIZER_MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        scope="summarizer",
+        version=3,
+        description="add summary prompt and concurrency configuration",
+        statements=(
+            """
+            ALTER TABLE summarizer_model_config
+            ADD COLUMN prompt_preset TEXT NOT NULL DEFAULT 'focused'
+                CHECK (prompt_preset IN ('focused', 'decisions', 'technical', 'digest'))
+            """,
+            """
+            ALTER TABLE summarizer_model_config
+            ADD COLUMN custom_prompt TEXT
+                CHECK (custom_prompt IS NULL OR length(custom_prompt) <= 4000)
+            """,
+            """
+            ALTER TABLE summarizer_model_config
+            ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 3
+                CHECK (max_concurrency BETWEEN 1 AND 8)
+            """,
+        ),
+    ),
 )
 
 __all__ = ["SUMMARIZER_MIGRATIONS"]

@@ -8,7 +8,8 @@ import shlex
 from yukibot.kernel import CommandResult, ControlCommand
 
 from .errors import SummarizerError
-from .models import SummaryEndpoint, SummaryModelConfig, SummaryRule
+from .models import SummaryEndpoint, SummaryModelConfig, SummaryPromptPreset, SummaryRule
+from .prompts import PROMPT_PRESETS
 from .service import SummarizerService
 
 SUMMARY_HELP = """消息总结命令:
@@ -23,8 +24,14 @@ SUMMARY_HELP = """消息总结命令:
 模型配置:
 /summary model show
 /summary model set <provider> <model> [-api-key <key>] [-base-url <url>]
-/summary model tune <input_tokens> <output_tokens> <temperature> <timeout> <retries>
+/summary model tune <input_tokens> <output_tokens> <temperature> <timeout> <retries> [concurrency]
 /summary model clear
+总结提示词:
+/summary prompt list
+/summary prompt show
+/summary prompt use <focused|decisions|technical|digest>
+/summary prompt custom <自定义偏好>
+/summary prompt clear
 时间窗支持 30m、6h、1d, 默认 1d, 最大 30d。
 source/destination 支持数字 ID、@用户名和 Telegram 公开链接。
 群组话题支持 -100群组ID/话题ID、https://t.me/c/内部ID/话题ID,
@@ -67,15 +74,37 @@ class SummarizerCommands:
                     base_url=options.get("-base-url"),
                 )
                 return CommandResult(f"Summary model is configured: {_qualified_model(config)}.")
-            if arguments[:2] == ["model", "tune"] and len(arguments) == 7:
+            if arguments[:2] == ["model", "tune"] and len(arguments) in {7, 8}:
                 config = await self._service.tune_model(
                     input_token_limit=int(arguments[2]),
                     output_token_limit=int(arguments[3]),
                     temperature=float(arguments[4]),
                     timeout=float(arguments[5]),
                     max_retries=int(arguments[6]),
+                    max_concurrency=int(arguments[7]) if len(arguments) == 8 else None,
                 )
                 return CommandResult(_model_config(config))
+            if arguments == ["prompt", "list"]:
+                return CommandResult(
+                    "\n".join(
+                        f"{preset.value}: {definition.description}"
+                        for preset, definition in PROMPT_PRESETS.items()
+                    )
+                )
+            if arguments == ["prompt", "show"]:
+                config = await self._service.get_model_config()
+                if config is None:
+                    raise SummarizerError("消息总结模型未配置, 请先配置模型。")
+                return CommandResult(_prompt_config(config))
+            if arguments[:2] == ["prompt", "use"] and len(arguments) == 3:
+                config = await self._service.set_prompt_preset(arguments[2])
+                return CommandResult(_prompt_config(config))
+            if arguments[:2] == ["prompt", "custom"] and len(arguments) >= 3:
+                config = await self._service.set_custom_prompt(" ".join(arguments[2:]))
+                return CommandResult(_prompt_config(config))
+            if arguments == ["prompt", "clear"]:
+                config = await self._service.set_prompt_preset(SummaryPromptPreset.FOCUSED.value)
+                return CommandResult(_prompt_config(config))
             if arguments == ["list"]:
                 rules = await self._service.list_rules()
                 return CommandResult(
@@ -191,6 +220,7 @@ def _normalize_option_name(value: str) -> str:
 
 
 def _model_config(config: SummaryModelConfig) -> str:
+    active_prompt = "custom" if config.custom_prompt is not None else config.prompt_preset.value
     return "\n".join(
         (
             f"provider: {config.provider}",
@@ -202,6 +232,25 @@ def _model_config(config: SummaryModelConfig) -> str:
             f"temperature: {config.temperature:g}",
             f"timeout: {config.timeout:g}s",
             f"retries: {config.max_retries}",
+            f"concurrency: {config.max_concurrency}",
+            f"prompt: {active_prompt}",
+        )
+    )
+
+
+def _prompt_config(config: SummaryModelConfig) -> str:
+    if config.custom_prompt is not None:
+        return "\n".join(
+            (
+                "prompt: custom",
+                f"custom prompt: {config.custom_prompt}",
+            )
+        )
+    definition = PROMPT_PRESETS[config.prompt_preset]
+    return "\n".join(
+        (
+            f"prompt: {config.prompt_preset.value}",
+            f"description: {definition.description}",
         )
     )
 

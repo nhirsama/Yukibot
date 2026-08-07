@@ -39,7 +39,7 @@ class _TopicOutput(BaseModel):
 class _SummaryOutput(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    topics: list[_TopicOutput] = Field(min_length=1, max_length=12)
+    topics: list[_TopicOutput] = Field(max_length=12)
 
 
 class _RetryableResponseError(RuntimeError):

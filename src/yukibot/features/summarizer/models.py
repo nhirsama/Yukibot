@@ -15,6 +15,13 @@ class SummaryChatKind(StrEnum):
     CHANNEL = "channel"
 
 
+class SummaryPromptPreset(StrEnum):
+    FOCUSED = "focused"
+    DECISIONS = "decisions"
+    TECHNICAL = "technical"
+    DIGEST = "digest"
+
+
 @dataclass(frozen=True, slots=True)
 class SummaryModelConfig:
     provider: str
@@ -26,6 +33,9 @@ class SummaryModelConfig:
     temperature: float = 0.1
     timeout: float = 120.0
     max_retries: int = 2
+    prompt_preset: SummaryPromptPreset = SummaryPromptPreset.FOCUSED
+    custom_prompt: str | None = None
+    max_concurrency: int = 3
 
     def __post_init__(self) -> None:
         provider = self.provider.strip().casefold()
@@ -42,12 +52,23 @@ class SummaryModelConfig:
             raise ValueError("summary model temperature must be between 0 and 2")
         if not 0 < self.timeout <= 1800 or not 0 <= self.max_retries <= 10:
             raise ValueError("summary model timeout and retry count are invalid")
+        if not 1 <= self.max_concurrency <= 8:
+            raise ValueError("summary model concurrency must be between 1 and 8")
+        try:
+            prompt_preset = SummaryPromptPreset(self.prompt_preset)
+        except ValueError as error:
+            raise ValueError("unknown summary prompt preset") from error
         api_key = self.api_key.strip() if self.api_key is not None else None
         base_url = self.base_url.strip().rstrip("/") if self.base_url is not None else None
+        custom_prompt = self.custom_prompt.strip() if self.custom_prompt is not None else None
+        if custom_prompt is not None and len(custom_prompt) > 4000:
+            raise ValueError("custom summary prompt must not exceed 4000 characters")
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "api_key", api_key or None)
         object.__setattr__(self, "base_url", base_url or None)
+        object.__setattr__(self, "prompt_preset", prompt_preset)
+        object.__setattr__(self, "custom_prompt", custom_prompt or None)
 
 
 def _normalize_username(username: str | None) -> str | None:

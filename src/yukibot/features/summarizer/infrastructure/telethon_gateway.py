@@ -79,7 +79,7 @@ class TelethonSummaryGateway:
         source: SummaryEndpoint,
         *,
         since: datetime,
-        limit: int,
+        limit: int | None = None,
     ) -> FetchedSummaryMessages:
         peer = await self._endpoint_peer(source)
         try:
