@@ -150,6 +150,7 @@ class SummaryMessage:
     grouped_id: int | str | None = None
     forwarded_from: str | None = None
     links: tuple[str, ...] = ()
+    outgoing: bool = False
 
     def __post_init__(self) -> None:
         if not self.refs:

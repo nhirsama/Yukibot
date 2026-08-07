@@ -233,7 +233,12 @@ class SummarizerService:
             since=started_at - timedelta(seconds=effective_window),
             limit=None,
         )
-        useful = tuple(message for message in fetched.messages if message.text.strip())
+        useful = tuple(
+            message
+            for message in fetched.messages
+            if message.text.strip()
+            and not (rule.source.chat_id == rule.destination.chat_id and message.outgoing)
+        )
         if not useful:
             raise NoMessagesToSummarizeError("所选时间范围内没有可总结的文字消息")
         source = replace(fetched, messages=_merge_messages(useful))
@@ -433,6 +438,7 @@ def _merge_messages(messages: tuple[SummaryMessage, ...]) -> tuple[SummaryMessag
                 previous.grouped_id or message.grouped_id,
                 previous.forwarded_from or message.forwarded_from,
                 tuple(dict.fromkeys((*previous.links, *message.links))),
+                previous.outgoing,
             )
         else:
             merged.append(message)

@@ -56,6 +56,7 @@ async def test_gateway_fetches_normalized_topic_history_and_sends_to_topic() -> 
         date=now,
         sender=FakePeer(7, "Alice"),
         replied_message_id=42,
+        outgoing=True,
     )
     gateway = TelethonSummaryGateway(client, peers)  # type: ignore[arg-type]
     endpoint = SummaryEndpoint(-1001, 42, "source_group")
@@ -67,6 +68,7 @@ async def test_gateway_fetches_normalized_topic_history_and_sends_to_topic() -> 
     assert fetched.chat_kind is SummaryChatKind.GROUP
     assert [item.message_ids for item in fetched.messages] == [(42,), (43,)]
     assert fetched.messages[1].sender_name == "Alice"
+    assert fetched.messages[1].outgoing is True
     assert fetched.messages[1].links == ("https://example.com/item",)
     assert sent.chat_id == -1002
     assert client.calls[0][0] == "recent"

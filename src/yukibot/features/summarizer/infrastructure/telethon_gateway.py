@@ -169,6 +169,7 @@ def _summary_message(message: NativeMessage, observed_at: datetime) -> SummaryMe
         common.grouped_id,
         _forwarded_from(message._raw),
         _message_links(message),
+        message.outgoing,
     )
 
 

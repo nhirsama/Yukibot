@@ -169,6 +169,7 @@ def message(
     minute: int = 0,
     sender_id: int = 7,
     sender_name: str = "Alice",
+    outgoing: bool = False,
 ) -> SummaryMessage:
     return SummaryMessage(
         (MessageRef(-1001, message_id),),
@@ -176,6 +177,7 @@ def message(
         sender_name,
         text,
         sender_id,
+        outgoing=outgoing,
     )
 
 
@@ -326,6 +328,31 @@ async def test_run_merges_messages_grounds_model_output_and_sends_to_topic() -> 
     assert telegram.fetches[0][2] is None
     age = datetime.now(UTC) - telegram.fetches[0][1]
     assert timedelta(minutes=59) < age < timedelta(minutes=61)
+
+
+async def test_same_chat_summary_excludes_outgoing_messages() -> None:
+    repository = MemorySummaryRepository()
+    telegram = FakeSummaryTelegram()
+    endpoint = telegram.endpoints["source"]
+    telegram.endpoints["destination"] = endpoint
+    telegram.fetched = FetchedSummaryMessages(
+        endpoint,
+        SummaryChatKind.GROUP,
+        "Shared group",
+        (
+            message(10, "有效信息"),
+            message(11, "上一条机器人总结", sender_id=999, sender_name="Bot", outgoing=True),
+        ),
+    )
+    generator = FakeSummaryGenerator([SummaryDocument((SummaryTopic("主题", "结论", (10,)),))])
+    repository.rules[1] = SummaryRule(1, endpoint, endpoint)
+    service = SummarizerService(repository, repository, repository, telegram, generator)
+
+    execution = await service.run_rule(1)
+
+    assert execution.message_count == 1
+    assert '"message_ids":[10]' in generator.prompts[0][1]
+    assert "11" not in generator.prompts[0][1]
 
 
 async def test_run_treats_an_empty_document_as_no_useful_information() -> None:
