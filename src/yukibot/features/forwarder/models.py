@@ -148,16 +148,24 @@ class PollCursor:
 
 @dataclass(frozen=True, slots=True)
 class ManagedTopic:
-    """A topic created and named from one source chat in one destination forum."""
+    """A topic created from one source chat/topic in one destination forum."""
 
     source_chat_id: int
     destination_chat_id: int
     topic_id: int
     title: str
+    source_topic_id: int | None = None
 
     def __post_init__(self) -> None:
         _validate_chat_id(self.source_chat_id)
         _validate_chat_id(self.destination_chat_id)
+        _validate_topic_id(self.source_topic_id)
+        if self.source_topic_id is not None:
+            object.__setattr__(
+                self,
+                "source_topic_id",
+                normalize_general_topic(self.source_topic_id),
+            )
         if self.topic_id <= 0:
             raise ValueError("topic_id must be positive")
         if not self.title:

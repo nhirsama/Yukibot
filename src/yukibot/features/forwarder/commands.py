@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import shlex
+from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from yukibot.kernel import CommandResult, ControlCommand
 
@@ -38,14 +40,23 @@ ROUTE_HELP = """转发路由命令:
 /route rebuild --all - 同时包含已停用路由
 /route rebuild status - 查看当前重建进度
 /route rebuild cancel - 取消当前重建
-source/destination 可使用数字 ID、@username、公开链接或私有邀请链接
-选项: [forward|copy] [source_topic|-] [destination_topic|-] [--poll <间隔>]
+source/destination 可使用数字 ID、@username、公开链接或私有邀请链接; 话题在引用末尾加 /话题ID
+选项: [forward|copy] [--poll <间隔>]
 默认自动加入源频道并实时接收; --poll 5m 表示不自动加入, 每 5 分钟拉取一次。
 私有邀请链接会先加入对应聊天; 其他方式配置的目标群必须已加入。
 轮询从配置后的新消息开始且不跟踪编辑/删除。
-默认使用 forward; 目标为论坛且 destination_topic 为 - 时, 自动创建与源频道同名的话题。"""
+默认使用 forward; 目标为论坛且目标引用未指定话题时, 自动创建与来源同名的话题。"""
 
 _POLL_DURATION = re.compile(r"^(?P<amount>[1-9][0-9]*)(?P<unit>[mhd]?)$")
+_NUMERIC_TOPIC = re.compile(r"^(?P<chat>-?[1-9][0-9]*)/(?P<topic>[1-9][0-9]*)$")
+_USERNAME_TOPIC = re.compile(r"^(?P<chat>@[^/\s]+)/(?P<topic>[1-9][0-9]*)$")
+_TELEGRAM_HOSTS = {"t.me", "telegram.me", "www.t.me", "www.telegram.me"}
+
+
+@dataclass(frozen=True, slots=True)
+class _EndpointReference:
+    chat: str
+    topic_id: int | None = None
 
 
 class ForwarderCommands:
@@ -121,26 +132,26 @@ async def _parse_route_draft(
     service: ForwarderManagementService,
 ) -> tuple[RouteDraft, tuple[ChatIdentity, ChatIdentity]]:
     positional, poll_interval = _extract_poll_option(arguments)
-    if not 2 <= len(positional) <= 5:
+    if not 2 <= len(positional) <= 3:
         raise ValueError("路由参数数量不正确")
     mode = ForwardMode(positional[2]) if len(positional) >= 3 else ForwardMode.FORWARD
-    source_topic = _topic_id(positional[3]) if len(positional) >= 4 else None
-    destination_topic = _topic_id(positional[4]) if len(positional) >= 5 else None
-    if poll_interval is not None and _is_private_invite(positional[0]):
+    source_reference = _endpoint_reference(positional[0])
+    destination_reference = _endpoint_reference(positional[1])
+    if poll_interval is not None and _is_private_invite(source_reference.chat):
         raise ValueError("轮询源不能使用私有邀请链接, 请改用实时模式")
-    source = await service.resolve_chat(positional[0])
-    destination = await service.resolve_chat(positional[1])
+    source = await service.resolve_chat(source_reference.chat)
+    destination = await service.resolve_chat(destination_reference.chat)
     return (
         RouteDraft(
             SourceEndpoint(
                 source.chat_id,
-                source_topic,
+                source_reference.topic_id,
                 username=source.username,
                 poll_interval_seconds=poll_interval,
             ),
             DestinationEndpoint(
                 destination.chat_id,
-                destination_topic,
+                destination_reference.topic_id,
                 username=destination.username,
             ),
             mode=mode,
@@ -193,8 +204,30 @@ def _is_private_invite(reference: str) -> bool:
     )
 
 
-def _topic_id(value: str) -> int | None:
-    return None if value in {"-", "none"} else int(value)
+def _endpoint_reference(value: str) -> _EndpointReference:
+    reference = value.strip()
+    for pattern in (_NUMERIC_TOPIC, _USERNAME_TOPIC):
+        if match := pattern.fullmatch(reference):
+            return _EndpointReference(match.group("chat"), int(match.group("topic")))
+
+    parsed = urlparse(reference)
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() not in _TELEGRAM_HOSTS:
+        return _EndpointReference(reference)
+    parts = [part for part in parsed.path.split("/") if part]
+    if parts and parts[0] == "s":
+        parts = parts[1:]
+    if parts and parts[0] == "c":
+        if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+            raise ValueError("Telegram 私有群话题链接格式不正确")
+        return _EndpointReference(f"-100{parts[1]}", int(parts[2]))
+    if (
+        len(parts) == 2
+        and not parts[0].startswith("+")
+        and parts[0] != "joinchat"
+        and parts[1].isdigit()
+    ):
+        return _EndpointReference(f"@{parts[0]}", int(parts[1]))
+    return _EndpointReference(reference)
 
 
 def _route_summary(
@@ -259,7 +292,7 @@ def _endpoint(
         if normalized_title and normalized_title not in unavailable_titles
         else reference
     )
-    return chat if topic_id is None else f"{chat}/topic/{topic_id}"
+    return chat if topic_id is None else f"{chat}/{topic_id}"
 
 
 def _format_duration(seconds: int) -> str:

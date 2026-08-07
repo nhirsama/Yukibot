@@ -144,17 +144,23 @@ async def test_managed_topics_are_upserted_and_persisted(tmp_path: Path) -> None
     original = ManagedTopic(-1001, -2001, 50, "Source channel")
     renamed = ManagedTopic(-1001, -2001, 50, "Renamed channel")
     try:
-        assert await topics.get(-1001, -2001) is None
+        assert await topics.get(-1001, None, -2001) is None
         await topics.save(original)
         await topics.save(renamed)
-        assert await topics.get(-1001, -2001) == renamed
+        assert await topics.get(-1001, None, -2001) == renamed
+
+        child = ManagedTopic(-1001, -2001, 51, "Source group/Child", 7)
+        await topics.save(child)
+        assert await topics.get(-1001, 7, -2001) == child
     finally:
         await database.close()
 
     reopened = SqliteDatabase(database_url(path))
     await reopened.open()
     try:
-        assert await SqliteManagedTopicRepository(reopened).get(-1001, -2001) == renamed
+        repository = SqliteManagedTopicRepository(reopened)
+        assert await repository.get(-1001, None, -2001) == renamed
+        assert await repository.get(-1001, 7, -2001) == child
     finally:
         await reopened.close()
 

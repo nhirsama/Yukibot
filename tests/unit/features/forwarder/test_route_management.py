@@ -18,7 +18,12 @@ from yukibot.features.forwarder import (
     RouteDraft,
     SourceEndpoint,
 )
-from yukibot.features.forwarder.commands import ROUTE_HELP, ForwarderCommands
+from yukibot.features.forwarder.commands import (
+    ROUTE_HELP,
+    ForwarderCommands,
+    _endpoint_reference,
+    _EndpointReference,
+)
 from yukibot.features.forwarder.management import ForwarderManagementService
 from yukibot.kernel import ControlCommand
 
@@ -63,9 +68,17 @@ class FakeSources:
         self.prepared: list[tuple[SourceEndpoint, bool]] = []
         self.resolutions: list[str] = []
         self.latest = 42
+        self.topic_titles: dict[int, str] = {}
 
     def chat_title(self, chat_id: int) -> str:
         return {-1001: "Source channel", -2001: "Target group"}.get(chat_id, str(chat_id))
+
+    async def source_title(self, source: SourceEndpoint) -> str | None:
+        title = self.chat_title(source.chat_id)
+        if source.topic_id is None:
+            return title
+        topic_title = self.topic_titles.get(source.topic_id)
+        return f"{title}/{topic_title}" if topic_title is not None else title
 
     async def resolve_chat(self, reference: str) -> ChatIdentity:
         self.resolutions.append(reference)
@@ -88,6 +101,29 @@ class FailingSources(FakeSources):
 
 def test_help_response_cannot_be_recognized_as_an_outgoing_command() -> None:
     assert not ROUTE_HELP.startswith("/")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        ("-1003953295839/546", _EndpointReference("-1003953295839", 546)),
+        ("@source/546", _EndpointReference("@source", 546)),
+        (
+            "https://t.me/c/3953295839/546",
+            _EndpointReference("-1003953295839", 546),
+        ),
+        (
+            "https://t.me/public_group/546",
+            _EndpointReference("@public_group", 546),
+        ),
+        ("@source", _EndpointReference("@source")),
+    ),
+)
+def test_endpoint_reference_uses_topic_suffix(
+    value: str,
+    expected: _EndpointReference,
+) -> None:
+    assert _endpoint_reference(value) == expected
 
 
 async def test_route_command_defaults_to_forward_with_copy_fallback() -> None:
@@ -114,6 +150,26 @@ async def test_username_route_auto_joins_source_and_persists_canonical_ids() -> 
     assert route.source == SourceEndpoint(-1001, username="source")
     assert route.destination == DestinationEndpoint(-2001, username="target")
     assert sources.prepared == [(route.source, True)]
+
+
+async def test_route_command_reads_topics_from_endpoint_suffixes() -> None:
+    routes = MemoryRoutes()
+    sources = FakeSources()
+    commands = ForwarderCommands(ForwarderManagementService(routes, sources=sources))
+
+    result = await commands.handle(
+        ControlCommand("/route", "add @source/7 @target/9 forward", -9, 1, 42, True)
+    )
+
+    assert result.text == "Route 1 is configured."
+    route = routes.routes[1]
+    assert route.source == SourceEndpoint(-1001, 7, username="source")
+    assert route.destination == DestinationEndpoint(-2001, 9, username="target")
+    assert sources.resolutions == ["@source", "@target"]
+    listed = await commands.handle(ControlCommand("/route", "list", -9, 2, 42, True))
+    assert listed.text == (
+        "1: Source channel (@source)/7 -> Target group (@target)/9 (forward, enabled)"
+    )
 
 
 async def test_invite_link_route_persists_stable_ids_and_join_references() -> None:
@@ -179,7 +235,7 @@ async def test_poll_option_does_not_join_and_initializes_cursor_at_latest_messag
     await commands.handle(
         ControlCommand(
             "/route",
-            "add @source @target forward - - --poll 5m",
+            "add @source @target forward --poll 5m",
             -9,
             1,
             42,
@@ -275,6 +331,20 @@ async def test_adding_route_prepares_automatic_forum_topic_immediately() -> None
     await service.add_route(Route(7, SourceEndpoint(-1001), DestinationEndpoint(-2001)))
 
     assert telegram.created_topics[0][0:2] == (-2001, "Source channel")
+
+
+async def test_topic_route_names_automatic_forum_topic_with_group_and_topic() -> None:
+    routes = MemoryRoutes()
+    sources = FakeSources()
+    sources.topic_titles[7] = "Announcements"
+    telegram = FakeTelegramGateway()
+    telegram.forum_chats.add(-2001)
+    topics = ManagedTopicService(InMemoryManagedTopicRepository(), telegram)
+    service = ForwarderManagementService(routes, topics, sources=sources)
+
+    await service.add_route(Route(7, SourceEndpoint(-1001, topic_id=7), DestinationEndpoint(-2001)))
+
+    assert telegram.created_topics[0][0:2] == (-2001, "Source channel/Announcements")
 
 
 async def test_route_management_uses_explicit_idempotent_desired_state() -> None:

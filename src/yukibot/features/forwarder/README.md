@@ -14,7 +14,8 @@
 - 内容类型白名单、黑名单及服务消息开关；
 - 默认 native forward 和显式 copy 模式；
 - native forward 受限时按路由回退到 copy；
-- 向论坛群转发时自动创建、复用与源频道同名的话题；
+- 向论坛群转发时自动创建、复用与来源同名的话题；指定超级群组内部话题时使用“群组名/话题名”，
+  未指定话题时使用群组名；
 - 源频道改名时同步自动话题名称；
 - 回复链 source/destination message ID 映射；
 - 相册按 `(chat_id, grouped_id)` 缓冲、排序并整体发送；
@@ -61,8 +62,9 @@ gateway 不注册 handler，也不拥有 client 生命周期。
 才推进游标。轮询只发现新增消息，不提供编辑和删除同步。
 
 未显式配置 `DestinationEndpoint.topic_id` 时，`ManagedTopicService` 会先判断目标是否为论坛群。
-论坛群使用 `(source_chat_id, destination_chat_id)` 持久化自动话题；创建请求使用稳定 random ID，
-让创建成功但映射尚未落库时的重试仍保持幂等。创建后只使用持久化的 `topic_id` 定位，普通消息
+论坛群使用 `(source_chat_id, source_topic_id, destination_chat_id)` 持久化自动话题；创建请求使用
+稳定 random ID，让创建成功但映射尚未落库时的重试仍保持幂等。创建后只使用持久化的 `topic_id`
+定位，普通消息
 不会根据临时或缺失的会话标题重命名话题；只有明确的频道改名事件或管理操作会同步标题。显式话题
 和普通群不会进入自动话题管理。
 

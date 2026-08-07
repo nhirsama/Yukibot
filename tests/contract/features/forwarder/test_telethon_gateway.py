@@ -121,6 +121,19 @@ async def test_gateway_exposes_forum_metadata_and_topic_operations() -> None:
     ]
 
 
+async def test_source_title_includes_forum_topic_name_only_for_specific_topic() -> None:
+    gateway, client, peers = make_gateway()
+    source = FakePeer(-1001, "Source group", forum=True)
+    peers.remember(source)
+    client.forum_topic_titles[(-1001, 42)] = "Announcements"
+
+    assert await gateway.source_title(SourceEndpoint(-1001)) == "Source group"
+    assert await gateway.source_title(SourceEndpoint(-1001, topic_id=42)) == (
+        "Source group/Announcements"
+    )
+    assert client.calls == [("topic-title", -1001, 42)]
+
+
 def test_missing_source_peer_has_no_invented_topic_title() -> None:
     gateway, _, _ = make_gateway()
 

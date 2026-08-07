@@ -119,7 +119,10 @@ class ForwarderService:
                 continue
             async with self._route_lock(route.id):
                 try:
-                    effective_route = await self._resolve_destination(route, source_title=new_title)
+                    effective_route = await self._resolve_destination(
+                        route,
+                        source_title=(new_title if route.source.topic_id is None else None),
+                    )
                     if route.id not in matched_ids:
                         continue
                     existing = await self.links.get(route.id, message.ref)

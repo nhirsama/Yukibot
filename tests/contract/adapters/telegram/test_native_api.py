@@ -13,6 +13,7 @@ from telethon.tl.functions.messages import (
     CreateForumTopicRequest,
     EditForumTopicRequest,
     ForwardMessagesRequest,
+    GetForumTopicsByIDRequest,
     ImportChatInviteRequest,
 )
 
@@ -71,6 +72,8 @@ async def test_stable_adapter_uses_raw_topic_requests() -> None:
 
         async def __call__(self, request):  # type: ignore[no-untyped-def]
             self.requests.append(request)
+            if isinstance(request, GetForumTopicsByIDRequest):
+                return SimpleNamespace(topics=(SimpleNamespace(id=99, title="Announcements"),))
             return object()
 
         def _get_response_message(self, request, result, peer):  # type: ignore[no-untyped-def]
@@ -84,17 +87,21 @@ async def test_stable_adapter_uses_raw_topic_requests() -> None:
     client = TelethonClientAdapter(raw)
 
     messages = await client.forward_messages(target, [7], source, topic_id=99)
+    source_topic_title = await client.get_forum_topic_title(source, 99)
     topic_id = await client.create_forum_topic(target, "Source", random_id=123)
     await client.edit_forum_topic(target, topic_id, title="Renamed")
 
     assert [message.id for message in messages] == [101]
+    assert source_topic_title == "Announcements"
     assert topic_id == 303
     assert isinstance(raw.requests[0], ForwardMessagesRequest)
     assert raw.requests[0].top_msg_id == 99
-    assert isinstance(raw.requests[1], CreateForumTopicRequest)
-    assert raw.requests[1].random_id == 123
-    assert isinstance(raw.requests[2], EditForumTopicRequest)
-    assert raw.requests[2].topic_id == 303
+    assert isinstance(raw.requests[1], GetForumTopicsByIDRequest)
+    assert raw.requests[1].topics == [99]
+    assert isinstance(raw.requests[2], CreateForumTopicRequest)
+    assert raw.requests[2].random_id == 123
+    assert isinstance(raw.requests[3], EditForumTopicRequest)
+    assert raw.requests[3].topic_id == 303
 
 
 async def test_stable_telethon_message_reaches_the_application_contract(tmp_path: Path) -> None:

@@ -121,9 +121,9 @@ class ForwarderManagementService:
 
     async def _prepare_topic(self, route: Route) -> None:
         if route.enabled and self.topics is not None:
-            source_title = (
-                self.sources.chat_title(route.source.chat_id) if self.sources is not None else None
-            )
+            source_title = None
+            if self.sources is not None:
+                source_title = await self.sources.source_title(route.source)
             await self.topics.resolve(route, source_title=source_title)
 
     async def _prepare_source(self, route: Route) -> None:

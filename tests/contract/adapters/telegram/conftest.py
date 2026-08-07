@@ -111,6 +111,7 @@ class FakeNativeClient:
         self.invite_checks: dict[str, FakePeer | None] = {}
         self.invite_joins: dict[str, tuple[FakePeer, ...]] = {}
         self.invite_join_errors: dict[str, Exception] = {}
+        self.forum_topic_titles: dict[tuple[int, int], str] = {}
 
     def add_event_handler(self, handler, event_cls):  # type: ignore[no-untyped-def]
         self.handlers[event_cls] = handler
@@ -156,6 +157,10 @@ class FakeNativeClient:
             for message_id in message_ids
             if (int(chat.id), message_id) in self.messages
         )
+
+    async def get_forum_topic_title(self, chat: FakePeer, topic_id: int) -> str | None:
+        self.calls.append(("topic-title", int(chat.id), topic_id))
+        return self.forum_topic_titles.get((int(chat.id), topic_id))
 
     async def resolve_peer(self, reference: int | str) -> FakePeer:
         self.calls.append(("resolve", reference))

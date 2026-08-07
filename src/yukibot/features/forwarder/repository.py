@@ -19,6 +19,7 @@ from .models import (
     Route,
     RouteDraft,
     SourceEndpoint,
+    normalize_general_topic,
 )
 from .recovery import ChatAccess
 from .routing import assert_acyclic_routes
@@ -220,14 +221,19 @@ class SqliteManagedTopicRepository:
     def __init__(self, database: Database) -> None:
         self._database = database
 
-    async def get(self, source_chat_id: int, destination_chat_id: int) -> ManagedTopic | None:
+    async def get(
+        self,
+        source_chat_id: int,
+        source_topic_id: int | None,
+        destination_chat_id: int,
+    ) -> ManagedTopic | None:
         row = await self._database.fetch_one(
             """
-            SELECT source_chat_id, destination_chat_id, topic_id, title
+            SELECT source_chat_id, source_topic_id, destination_chat_id, topic_id, title
             FROM forwarder_managed_topics
-            WHERE source_chat_id = ? AND destination_chat_id = ?
+            WHERE source_chat_id = ? AND source_topic_id = ? AND destination_chat_id = ?
             """,
-            (source_chat_id, destination_chat_id),
+            (source_chat_id, _stored_source_topic_id(source_topic_id), destination_chat_id),
         )
         return _managed_topic_from_row(row) if row is not None else None
 
@@ -235,15 +241,16 @@ class SqliteManagedTopicRepository:
         await self._database.execute(
             """
             INSERT INTO forwarder_managed_topics (
-                source_chat_id, destination_chat_id, topic_id, title
-            ) VALUES (?, ?, ?, ?)
-            ON CONFLICT (source_chat_id, destination_chat_id) DO UPDATE SET
+                source_chat_id, source_topic_id, destination_chat_id, topic_id, title
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (source_chat_id, source_topic_id, destination_chat_id) DO UPDATE SET
                 topic_id = excluded.topic_id,
                 title = excluded.title,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (
                 topic.source_chat_id,
+                _stored_source_topic_id(topic.source_topic_id),
                 topic.destination_chat_id,
                 topic.topic_id,
                 topic.title,
@@ -433,12 +440,18 @@ def _link_from_row(row: Row) -> MessageLink:
 
 
 def _managed_topic_from_row(row: Row) -> ManagedTopic:
+    stored_source_topic_id = _int_column(row, "source_topic_id")
     return ManagedTopic(
         source_chat_id=_int_column(row, "source_chat_id"),
         destination_chat_id=_int_column(row, "destination_chat_id"),
         topic_id=_int_column(row, "topic_id"),
         title=_str_column(row, "title"),
+        source_topic_id=stored_source_topic_id or None,
     )
+
+
+def _stored_source_topic_id(topic_id: int | None) -> int:
+    return 0 if topic_id is None else normalize_general_topic(topic_id)
 
 
 def _chat_access_from_row(row: Row) -> ChatAccess:

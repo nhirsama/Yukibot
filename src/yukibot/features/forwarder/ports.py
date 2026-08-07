@@ -49,7 +49,12 @@ class MessageLinkRepository(Protocol):
 
 
 class ManagedTopicRepository(Protocol):
-    async def get(self, source_chat_id: int, destination_chat_id: int) -> ManagedTopic | None: ...
+    async def get(
+        self,
+        source_chat_id: int,
+        source_topic_id: int | None,
+        destination_chat_id: int,
+    ) -> ManagedTopic | None: ...
 
     async def save(self, topic: ManagedTopic) -> None: ...
 
@@ -140,6 +145,8 @@ class TelegramGateway(Protocol):
 
 class TelegramSourceGateway(Protocol):
     def chat_title(self, chat_id: int) -> str | None: ...
+
+    async def source_title(self, source: SourceEndpoint) -> str | None: ...
 
     async def resolve_chat(self, reference: str) -> ChatIdentity: ...
 

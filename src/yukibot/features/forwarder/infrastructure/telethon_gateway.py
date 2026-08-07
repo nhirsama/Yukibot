@@ -220,6 +220,15 @@ class TelethonGateway:
         peer = self._peers.get(chat_id)
         return _chat_title(peer) if peer is not None else None
 
+    async def source_title(self, source: SourceEndpoint) -> str | None:
+        group_title = self.chat_title(source.chat_id)
+        if source.topic_id is None:
+            return group_title
+        topic_title = await self._topic_title(source)
+        if topic_title is None:
+            return group_title
+        return f"{group_title}/{topic_title}" if group_title is not None else topic_title
+
     def is_forum(self, chat_id: int) -> bool:
         peer = self._peers.get(chat_id)
         return peer is not None and bool(getattr(peer, "forum", False))
@@ -357,6 +366,16 @@ class TelethonGateway:
         if not messages or not messages[0] or messages[0].id <= 0:
             raise MessageNotFound(f"message {source.chat_id}/{source.message_id} not found")
         return messages[0]
+
+    async def _topic_title(self, source: SourceEndpoint) -> str | None:
+        try:
+            async with self._request_limiter.slot(source.chat_id):
+                return await self._client.get_forum_topic_title(
+                    self._peer(source.chat_id),
+                    source.topic_id or 1,
+                )
+        except Exception:
+            return None
 
     async def _forward(
         self,

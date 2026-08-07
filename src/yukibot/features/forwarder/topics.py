@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 
 from .errors import PermanentDeliveryError
-from .models import DestinationEndpoint, ManagedTopic, Route
+from .models import DestinationEndpoint, ManagedTopic, Route, normalize_general_topic
 from .ports import ManagedTopicRepository, TelegramGateway
 
 
@@ -15,7 +15,7 @@ from .ports import ManagedTopicRepository, TelegramGateway
 class ManagedTopicService:
     repository: ManagedTopicRepository
     telegram: TelegramGateway
-    _locks: dict[tuple[int, int], asyncio.Lock] = field(
+    _locks: dict[tuple[int, int | None, int], asyncio.Lock] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -34,7 +34,12 @@ class ManagedTopicService:
         if not self.telegram.is_forum(route.destination.chat_id):
             return route.destination
 
-        key = (route.source.chat_id, route.destination.chat_id)
+        source_topic_id = (
+            None
+            if route.source.topic_id is None
+            else normalize_general_topic(route.source.topic_id)
+        )
+        key = (route.source.chat_id, source_topic_id, route.destination.chat_id)
         async with self._locks.setdefault(key, asyncio.Lock()):
             existing = await self.repository.get(*key)
             if existing is not None:
@@ -47,7 +52,13 @@ class ManagedTopicService:
                         existing.topic_id,
                         title=title,
                     )
-                    existing = ManagedTopic(*key, existing.topic_id, title)
+                    existing = ManagedTopic(
+                        existing.source_chat_id,
+                        existing.destination_chat_id,
+                        existing.topic_id,
+                        title,
+                        existing.source_topic_id,
+                    )
                     await self.repository.save(existing)
                 return DestinationEndpoint(existing.destination_chat_id, existing.topic_id)
 
@@ -63,7 +74,13 @@ class ManagedTopicService:
                 title,
                 random_id=_creation_random_id(*key),
             )
-            topic = ManagedTopic(*key, topic_id, title)
+            topic = ManagedTopic(
+                route.source.chat_id,
+                route.destination.chat_id,
+                topic_id,
+                title,
+                source_topic_id,
+            )
             await self.repository.save(topic)
             return DestinationEndpoint(topic.destination_chat_id, topic.topic_id)
 
@@ -78,7 +95,16 @@ def _topic_title(value: str) -> str:
     return encoded[:128].decode("utf-8", errors="ignore").rstrip()
 
 
-def _creation_random_id(source_chat_id: int, destination_chat_id: int) -> int:
-    payload = f"yukibot-topic:{source_chat_id}:{destination_chat_id}".encode()
+def _creation_random_id(
+    source_chat_id: int,
+    source_topic_id: int | None,
+    destination_chat_id: int,
+) -> int:
+    identity = (
+        f"{source_chat_id}:{destination_chat_id}"
+        if source_topic_id is None
+        else f"{source_chat_id}:{source_topic_id}:{destination_chat_id}"
+    )
+    payload = f"yukibot-topic:{identity}".encode()
     value = int.from_bytes(sha256(payload).digest()[:8], "big", signed=True)
     return value or 1

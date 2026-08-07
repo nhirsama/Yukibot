@@ -139,6 +139,8 @@ class NativeClient(Protocol):
 
     async def edit_forum_topic(self, chat: object, topic_id: int, *, title: str) -> None: ...
 
+    async def get_forum_topic_title(self, chat: object, topic_id: int) -> str | None: ...
+
     async def send_message(
         self,
         chat: object,
@@ -572,6 +574,21 @@ class TelethonClientAdapter:
                 title=title,
             )
         )
+
+    async def get_forum_topic_title(self, chat: object, topic_id: int) -> str | None:
+        functions = cast(Any, import_module("telethon.tl.functions.messages"))
+        result = await self._client(
+            functions.GetForumTopicsByIDRequest(
+                peer=await self._client.get_input_entity(chat),
+                topics=[topic_id],
+            )
+        )
+        for topic in getattr(result, "topics", ()):
+            if int(getattr(topic, "id", 0)) != topic_id:
+                continue
+            title = getattr(topic, "title", None)
+            return title.strip() if isinstance(title, str) and title.strip() else None
+        return None
 
     async def send_message(
         self,

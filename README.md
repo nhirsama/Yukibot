@@ -60,8 +60,8 @@ Forwarder 提供：
 ```text
 /route list
 /route show <id>
-/route add <source> <destination> [forward|copy] [source_topic|-] [destination_topic|-] [--poll <间隔>]
-/route set <id> <source> <destination> [forward|copy] [source_topic|-] [destination_topic|-] [--poll <间隔>]
+/route add <source> <destination> [forward|copy] [--poll <间隔>]
+/route set <id> <source> <destination> [forward|copy] [--poll <间隔>]
 /route enable <id>
 /route disable <id>
 /route remove <id>
@@ -88,15 +88,20 @@ Forwarder 提供：
 用户名或公开链接配置目标群时，账号仍须已经加入目标群并拥有发消息所需的权限。
 
 路由默认使用 Telegram 原生转发；来源禁止转发或当前操作无法原生转发时自动回退为复制。目标是
-论坛超级群且没有指定 `destination_topic` 时，Yukibot 会创建一个与源频道同名的话题并保存映射；
+论坛超级群且没有指定 `destination_topic` 时，Yukibot 会创建并保存自动话题；源是超级群组内部话题时
+使用“群组名/话题名”，未指定内部话题时使用群组名；
 此后只使用持久化的 `topic_id` 定位，源频道改名后再通过明确的改名事件同步话题标题。临时缺失的
-频道名称不会覆盖已有标题。多条相同“源频道 -> 目标论坛群”路由复用同一个自动话题。
+频道名称不会覆盖已有标题。相同“源群组/源话题 -> 目标论坛群”的路由复用同一个自动话题，不同
+源话题使用各自独立的自动话题。
 账号需要在目标群拥有创建和管理话题的权限。
 
-要使用已有话题，可以显式传入话题 ID：
+要使用已有话题，在 source 或 destination 引用末尾添加 `/话题ID`。数字 ID、用户名和公开链接均
+支持该格式：
 
 ```text
-/route add -1001234567890 -1009876543210 forward - 12345
+/route add -1001234567890/546 -1009876543210 forward
+/route add @source_group/546 @target_group/12345
+/route add https://t.me/c/3953295839/546 https://t.me/target_group/12345
 ```
 
 对于不希望账号加入的公开源频道，可以指定轮询间隔：
@@ -111,7 +116,7 @@ Forwarder 提供：
 只转发之后出现的新消息，不回灌已有历史。游标在消息进入持久任务队列后推进并保存到 SQLite，
 重启后继续拉取。轮询模式不接收 Telegram 实时更新，因此不会同步已拉取消息之后发生的编辑和删除。
 
-目标不是论坛群时，省略 `destination_topic` 表示直接发送到该群。显式使用 `copy` 可以始终复制
+目标不是论坛群时，目标引用不带话题 ID 表示直接发送到该群。显式使用 `copy` 可以始终复制
 消息内容，不保留 Telegram 的“转发自”标记。
 
 动态转发路由保存在 `forwarder_routes` 表中。`add` 由数据库自动分配路由 ID，重复添加相同配置
